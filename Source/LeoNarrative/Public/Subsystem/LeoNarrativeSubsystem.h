@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Containers/Ticker.h"
 #include "Blackboard/NarrativeBlackboard.h"
+#include "Data/LeoGraphEval.h"
 #include "ScriptRuntime/LeoScriptRegistry.h"
 #include "VM/LeoEvents.h"
 #include "VM/LeoVM.h"
@@ -16,6 +17,17 @@ class ULeoDialogueWidget;
 class ULeoScenarioGraph;
 class ULeoSequencerPerformer;
 class ULeoStage;
+
+// 图调用栈的一帧（Subgraph 嵌套）
+USTRUCT()
+struct FLeoGraphFrame
+{
+	GENERATED_BODY()
+	UPROPERTY()
+	TObjectPtr<ULeoScenarioGraph> Graph;
+	UPROPERTY()
+	FName NodeId;
+};
 
 // ---- 调试快照（编辑器调试器 Tab 只读消费；跨模块导出）----
 struct LEONARRATIVE_API FLeoDebugVar
@@ -87,11 +99,17 @@ public:
 	// 对话 UI 开关（纯 C++ Slate，无需编辑器资产）
 	void ShowDialogueUI(bool bShow);
 
-	// ---- ScenarioGraph 编排 ----
-	// 从图的节点跑章节；章末按出边条件（优先级降序）选下一节点，无路可走 = 图完结
+	// ---- ScenarioGraph 编排（节点类型化：Chapter/Branch/Ending/Subgraph）----
+	// 从图的节点跑；转移时机 = 章末 / Branch 立即；子图收束后回父层继续；
+	// 最外层图到达 Ending 或无路可走时完结，经 OnGraphFinished 广播 EndingId
 	void StartGraph(ULeoScenarioGraph* Graph, FName StartNode = NAME_None);
-	bool IsGraphActive() const { return ActiveGraph != nullptr; }
-	FName GetCurrentGraphNode() const { return CurrentGraphNodeId; }
+	bool IsGraphActive() const { return GraphStack.Num() > 0; }
+	FName GetCurrentGraphNode() const { return GraphStack.IsEmpty() ? NAME_None : GraphStack.Last().NodeId; }
+	const ULeoScenarioGraph* GetActiveGraph() const { return GraphStack.IsEmpty() ? nullptr : GraphStack.Last().Graph; }
+
+	// 图完结（外层）：EndingId = Ending 节点标识；NAME_None = 无路可走收束
+	DECLARE_MULTICAST_DELEGATE_OneParam(FLeoOnGraphFinished, FName /*EndingId*/);
+	FLeoOnGraphFinished OnGraphFinished;
 
 	// ---- 自定义命令与玩法断点 ----
 	// 严格注册：编译期按 spec 校验参数（编辑期报错带行号）
@@ -126,9 +144,9 @@ private:
 	bool StartChapterInternal(FName Chapter, FName Label, int32 Offset);
 	void HandleVMEvent(const FLeoEvent& Ev);
 	bool TickVM(float DeltaSeconds);
-	void RunGraphNode(FName NodeId);
-	void AdvanceGraph();
-	bool EvalEdgeCondition(const FString& Condition);
+	void RunGraphNode(FName NodeId);        // 按节点类型分派
+	void AdvanceGraph();                    // 章末转移入口
+	void AdvanceFromCurrentNode();          // 出边选择循环（子图收束自动弹栈）
 	void RefreshCommandRegistry(); // 把 VM 静态命令表同步给编译注册表
 
 	UPROPERTY()
@@ -149,10 +167,10 @@ private:
 	TObjectPtr<ULeoAssetManifest> Manifest;
 
 	UPROPERTY()
-	TObjectPtr<ULeoScenarioGraph> ActiveGraph;
-	FName CurrentGraphNodeId;
-	TMap<FString, leo::FLeoExprPtr> EdgeExprCache; // 图边条件编译缓存（非反射）
+	TArray<FLeoGraphFrame> GraphStack;
+	LeoGraphEval::FExprCache EdgeExprCache; // 图边条件编译缓存（非反射）
 	bool bGraphAdvancePending = false;
+	static constexpr int32 MaxGraphDepth = 16; // 子图嵌套上限（防自引用死循环）
 
 	FTSTicker::FDelegateHandle TickerHandle;
 	bool bAuto = false;

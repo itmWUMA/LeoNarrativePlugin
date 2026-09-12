@@ -31,10 +31,12 @@ namespace LeoValidation
 	{
 		TArray<FLeoFileResult> Files;
 		TArray<FLeoCheckItem> AssetItems; // 资产引用核对（无清单时为空）
+		TArray<FLeoCheckItem> GraphItems; // 编排图核对（无图资产时为空）
 		FString ManifestPath;             // 参与核对的清单资产；空 = 未找到，核对跳过
 		int32 Failures = 0;               // 预期不符的文件数
 		int32 AssetErrors = 0;            // 资产核对错误条数
-		bool AllGreen() const { return Failures == 0 && AssetErrors == 0; }
+		int32 GraphErrors = 0;            // 编排图核对错误条数
+		bool AllGreen() const { return Failures == 0 && AssetErrors == 0 && GraphErrors == 0; }
 	};
 
 	// 结构化校验（面板消费）。ManifestAssetPath 为空 = 自动发现工程内 ULeoAssetManifest
@@ -44,8 +46,11 @@ namespace LeoValidation
 	// bExpectClean=true 时期待零错误；false 时期待有错误（golden fail 语料）。
 	bool ValidateFile(const FString& Path, bool bExpectClean);
 
-	// 兼容旧入口：结构化校验 + 日志输出（菜单/命令行）。返回失败数（含资产核对错误）
+	// 兼容旧入口：结构化校验 + 日志输出（菜单/命令行）。返回失败数（含资产/图核对错误）
 	int32 ValidateAll(const FString& ManifestAssetPath = FString());
+
+	// 图核对自测（-selftest-graph）：内存构造 正常/破损 图跑核对器，返回失败断言数（0=通过）
+	int32 SelfTestGraphChecks();
 
 	// 脚本热校验完成通知（面板订阅后自动刷新）
 	extern FLeoOnScriptsRevalidated OnScriptsRevalidated;

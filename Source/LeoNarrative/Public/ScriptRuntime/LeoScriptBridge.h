@@ -28,6 +28,10 @@ namespace LeoBridge
 	// 单独编译表达式（ScenarioGraph 边条件等）
 	LEONARRATIVE_API leo::FLeoExprPtr CompileExpr(const FString& ExprSrc, leo::FLeoDiag& OutDiag);
 
+	// 表达式求值（纯内核 LeoEval 的导出包装——编辑器模块经此调用，不直接链内核符号）
+	LEONARRATIVE_API bool EvalExpr(const leo::FLeoExprPtr& Expr, const leo::FLeoVarResolver& Resolver,
+		leo::FLeoValue& OutValue, leo::ELeoDiag& OutCode, std::string& OutMsg);
+
 	// 诊断码名的 TCHAR 形式（日志/显示用）
 	LEONARRATIVE_API const TCHAR* DiagName(leo::ELeoDiag Code);
 

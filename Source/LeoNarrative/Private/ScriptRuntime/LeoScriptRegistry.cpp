@@ -62,6 +62,30 @@ bool ULeoScriptRegistry::RecompileChapter(FName Chapter)
 	return CompileOne(Path);
 }
 
+bool ULeoScriptRegistry::CompileMemory(FName Chapter, const FString& Source)
+{
+	LeoBridge::SetCustomCommandSpecs(CustomCommandSpecs);
+	LeoBridge::SetCustomCommandNames(CustomCommandNames);
+	leo::FLeoProgram Program = LeoBridge::CompileChapter(Source, Chapter.ToString());
+	TArray<FString>& Diags = LastDiags.FindOrAdd(Chapter);
+	Diags.Reset();
+	for (const leo::FLeoDiag& D : Program.Diags)
+	{
+		const FString Line = FString::Printf(TEXT("%s(%d): %s  %s"),
+			*Chapter.ToString(), D.Line, LeoBridge::DiagName(D.Code), *LeoBridge::ToFString(D.Msg));
+		Diags.Add(Line);
+	}
+	if (!Program.Ok)
+	{
+		Programs.Remove(Chapter);
+		UE_LOG(LogLeoRegistry, Error, TEXT("内存编译失败: %s"), *Chapter.ToString());
+		return false;
+	}
+	Programs.Add(Chapter, MakeShared<leo::FLeoProgram>(std::move(Program)));
+	UE_LOG(LogLeoRegistry, Log, TEXT("内存编译通过: %s"), *Chapter.ToString());
+	return true;
+}
+
 bool ULeoScriptRegistry::CompileOne(const FString& FilePath)
 {
 	FString Source;

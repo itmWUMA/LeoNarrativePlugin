@@ -25,6 +25,7 @@ struct FLeoFileRow
 	FString Path;      // 绝对路径（资产核对行为清单资产路径）
 	bool bPass = true;
 	bool bIsAssetSection = false; // "资产引用核对" 伪条目
+	bool bIsGraphSection = false; // "编排图核对" 伪条目
 	int32 ItemIndex = -1;         // 对应 Summary.Files 索引
 };
 
@@ -90,6 +91,13 @@ public:
 		AssetRow->bIsAssetSection = true;
 		FileRows.Add(AssetRow);
 
+		const TSharedPtr<FLeoFileRow> GraphRow = MakeShared<FLeoFileRow>();
+		const bool bGraphOk = Summary.GraphErrors == 0;
+		GraphRow->Display = FString::Printf(TEXT("%s  编排图核对（%d 张图）"), bGraphOk ? TEXT("√") : TEXT("×"), Summary.GraphItems.Num());
+		GraphRow->bPass = bGraphOk;
+		GraphRow->bIsGraphSection = true;
+		FileRows.Add(GraphRow);
+
 		SelectedFileRow = nullptr;
 		RebuildDiags();
 		if (FileList.IsValid()) { FileList.Pin()->RequestListRefresh(); }
@@ -112,6 +120,13 @@ public:
 				for (const LeoValidation::FLeoCheckItem& It : Summary.AssetItems)
 				{
 					AddDiag(It, It.Code == TEXT("NO_MANIFEST_ENTRY") ? FString() : Summary.ManifestPath);
+				}
+			}
+			else if (SelectedFileRow->bIsGraphSection)
+			{
+				for (const LeoValidation::FLeoCheckItem& It : Summary.GraphItems)
+				{
+					AddDiag(It, It.File); // 双击打开对应图资产
 				}
 			}
 			else if (Summary.Files.IsValidIndex(SelectedFileRow->ItemIndex))

@@ -32,6 +32,8 @@ public class LeoNarrativeEditor : ModuleRules
 			"AssetRegistry",   // P0: 清单资产发现与存在性核对
 			"LevelSequence",   // P0: seq 逻辑名 → ULevelSequence 类型核对
 			"WorkspaceMenuStructure", // P0/P1: Nomad Tab 分组（Tools）
+			"PropertyEditor",   // T2: 图编辑器 Details 面板
+			"AssetDefinition",  // T2: UAssetDefinition（Gameplay→Narrative 子菜单入口）
 		}
 		);
 	}

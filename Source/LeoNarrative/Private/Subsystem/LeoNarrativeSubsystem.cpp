@@ -179,7 +179,7 @@ void ULeoNarrativeSubsystem::HandleVMEvent(const FLeoEvent& Ev)
 		break;
 	case ELeoEventKind::ChapterEnd:
 		UE_LOG(LogLeoNarrative, Display, TEXT("── 章节结束: %s ──"), *Ev.Chapter.ToString());
-		if (ActiveGraph)
+		if (IsGraphActive())
 		{
 			bGraphAdvancePending = true; // 延迟到帧末推进：当前正处于 VM 事件广播内
 		}
@@ -204,7 +204,7 @@ bool ULeoNarrativeSubsystem::TickVM(float DeltaSeconds)
 	return true; // 持续 ticking
 }
 
-// ---- ScenarioGraph 编排 ----
+// ---- ScenarioGraph 编排（节点类型化：Chapter/Branch/Ending/Subgraph）----
 
 void ULeoNarrativeSubsystem::StartGraph(ULeoScenarioGraph* Graph, FName StartNode)
 {
@@ -213,101 +213,122 @@ void ULeoNarrativeSubsystem::StartGraph(ULeoScenarioGraph* Graph, FName StartNod
 		UE_LOG(LogLeoNarrative, Error, TEXT("StartGraph: 图资产为空"));
 		return;
 	}
-	ActiveGraph = Graph;
+	GraphStack.Reset();
+	FLeoGraphFrame& Frame = GraphStack.AddDefaulted_GetRef();
+	Frame.Graph = Graph;
 	EdgeExprCache.Reset();
 	RunGraphNode(StartNode.IsNone() ? Graph->EntryNode : StartNode);
 }
 
 void ULeoNarrativeSubsystem::RunGraphNode(FName NodeId)
 {
-	if (!ActiveGraph)
-	{
-		return;
-	}
-	const FLeoScenarioNode* Node = ActiveGraph->FindNode(NodeId);
+	if (GraphStack.IsEmpty()) { return; }
+	const FLeoGraphFrame& Top = GraphStack.Last();
+	const FLeoScenarioNode* Node = Top.Graph ? Top.Graph->FindNode(NodeId) : nullptr;
 	if (!Node)
 	{
 		UE_LOG(LogLeoNarrative, Error, TEXT("图节点不存在: %s —— 图终止"), *NodeId.ToString());
-		ActiveGraph = nullptr;
+		GraphStack.Reset();
+		OnGraphFinished.Broadcast(NAME_None);
 		return;
 	}
-	CurrentGraphNodeId = NodeId;
-	UE_LOG(LogLeoNarrative, Display, TEXT("── 图节点: %s → %s@%s ──"), *NodeId.ToString(),
-		*Node->Chapter.ToString(), *Node->Label.ToString());
-	StartChapterAt(Node->Chapter, Node->Label, 0);
+	GraphStack.Last().NodeId = NodeId;
+
+	switch (Node->Type)
+	{
+	case ELeoScenarioNodeType::Chapter:
+		UE_LOG(LogLeoNarrative, Display, TEXT("── 图节点: %s → %s@%s ──"), *NodeId.ToString(),
+			*Node->Chapter.ToString(), *Node->Label.ToString());
+		StartChapterAt(Node->Chapter, Node->Label, 0);
+		break;
+
+	case ELeoScenarioNodeType::Branch:
+		// 不跑章节：立即按出边条件分流（jumpif 链的图形态）
+		AdvanceFromCurrentNode();
+		break;
+
+	case ELeoScenarioNodeType::Subgraph:
+	{
+		if (!Node->SubGraph)
+		{
+			UE_LOG(LogLeoNarrative, Error, TEXT("Subgraph 节点 %s 未配置子图 —— 图终止"), *NodeId.ToString());
+			GraphStack.Reset();
+			OnGraphFinished.Broadcast(NAME_None);
+			return;
+		}
+		if (GraphStack.Num() >= MaxGraphDepth)
+		{
+			UE_LOG(LogLeoNarrative, Error, TEXT("子图嵌套超过 %d 层（疑似自引用循环）—— 图终止"), MaxGraphDepth);
+			GraphStack.Reset();
+			OnGraphFinished.Broadcast(NAME_None);
+			return;
+		}
+		UE_LOG(LogLeoNarrative, Display, TEXT("── 子图进入: %s ──"), *Node->SubGraph->GetName());
+		FLeoGraphFrame& Sub = GraphStack.AddDefaulted_GetRef();
+		Sub.Graph = Node->SubGraph;
+		RunGraphNode(Node->SubGraph->EntryNode);
+		break;
+	}
+
+	case ELeoScenarioNodeType::Ending:
+	{
+		const FName EndingId = Node->EndingId;
+		if (GraphStack.Num() > 1)
+		{
+			// 子图内的 Ending = 子图正常收束：弹栈，从父层 Subgraph 节点的出边继续
+			UE_LOG(LogLeoNarrative, Display, TEXT("── 子图收束（%s）──"),
+				EndingId.IsNone() ? TEXT("") : *EndingId.ToString());
+			GraphStack.Pop();
+			AdvanceFromCurrentNode();
+		}
+		else
+		{
+			UE_LOG(LogLeoNarrative, Display, TEXT("── 结局: %s ──"),
+				EndingId.IsNone() ? TEXT("(未命名)") : *EndingId.ToString());
+			GraphStack.Reset();
+			OnGraphFinished.Broadcast(EndingId);
+		}
+		break;
+	}
+	}
 }
 
 void ULeoNarrativeSubsystem::AdvanceGraph()
 {
-	if (!ActiveGraph)
-	{
-		return;
-	}
-	const FLeoScenarioNode* Node = ActiveGraph->FindNode(CurrentGraphNodeId);
-	if (!Node)
-	{
-		ActiveGraph = nullptr;
-		return;
-	}
-	// 出边按优先级降序（稳定）
-	TArray<const FLeoScenarioEdge*> Edges;
-	for (const FLeoScenarioEdge& E : Node->Edges) { Edges.Add(&E); }
-	Edges.Sort([](const FLeoScenarioEdge& A, const FLeoScenarioEdge& B) { return A.Priority > B.Priority; });
-
-	for (const FLeoScenarioEdge* E : Edges)
-	{
-		if (!EvalEdgeCondition(E->Condition)) { continue; }
-		if (!ActiveGraph->FindNode(E->To))
-		{
-			UE_LOG(LogLeoNarrative, Warning, TEXT("边指向不存在的节点: %s，跳过"), *E->To.ToString());
-			continue;
-		}
-		RunGraphNode(E->To);
-		return;
-	}
-	UE_LOG(LogLeoNarrative, Display, TEXT("── 图完结（节点 %s 无满足条件的出边）──"), *CurrentGraphNodeId.ToString());
-	ActiveGraph = nullptr;
+	AdvanceFromCurrentNode();
 }
 
-bool ULeoNarrativeSubsystem::EvalEdgeCondition(const FString& Condition)
+void ULeoNarrativeSubsystem::AdvanceFromCurrentNode()
 {
-	if (Condition.TrimStartAndEnd().IsEmpty()) { return true; } // 空条件恒真
-
-	leo::FLeoExprPtr Expr = EdgeExprCache.FindRef(Condition);
-	if (!Expr)
+	while (!GraphStack.IsEmpty())
 	{
-		leo::FLeoDiag D;
-		Expr = LeoBridge::CompileExpr(Condition, D);
-		if (!Expr)
+		const FLeoGraphFrame& Top = GraphStack.Last();
+		const FLeoScenarioNode* Node = Top.Graph ? Top.Graph->FindNode(Top.NodeId) : nullptr;
+		if (!Node)
 		{
-			UE_LOG(LogLeoNarrative, Error, TEXT("边条件编译失败: %s (%s) —— 视为假"),
-				*Condition, LeoBridge::DiagName(D.Code));
-			return false;
+			UE_LOG(LogLeoNarrative, Error, TEXT("图节点丢失: %s —— 图终止"), *Top.NodeId.ToString());
+			GraphStack.Reset();
+			OnGraphFinished.Broadcast(NAME_None);
+			return;
 		}
-		EdgeExprCache.Add(Condition, Expr);
+		UNarrativeBlackboard* Local = ActiveVM ? ActiveVM->GetLocalBlackboard() : nullptr;
+		const FName Next = LeoGraphEval::SelectEdge(*Node, Local, GlobalBB, EdgeExprCache);
+		if (!Next.IsNone())
+		{
+			RunGraphNode(Next);
+			return;
+		}
+		// 无可用出边：子层弹栈继续父层（子图收束）；外层 = 图完结
+		if (GraphStack.Num() > 1)
+		{
+			GraphStack.Pop();
+			continue;
+		}
+		UE_LOG(LogLeoNarrative, Display, TEXT("── 图完结（节点 %s 无满足条件的出边）──"), *Top.NodeId.ToString());
+		GraphStack.Reset();
+		OnGraphFinished.Broadcast(NAME_None);
+		return;
 	}
-	// 变量解析：局部（若在）→ 全局
-	const leo::FLeoVarResolver Resolver = [this](const std::string& Name, leo::FLeoValue& OutV) -> bool
-	{
-		const FName Key(Name.c_str());
-		if (ActiveVM && ActiveVM->GetLocalBlackboard() && ActiveVM->GetLocalBlackboard()->GetValue(Key, OutV)) { return true; }
-		if (GlobalBB && GlobalBB->GetValue(Key, OutV)) { return true; }
-		return false;
-	};
-	leo::FLeoValue V;
-	leo::ELeoDiag Code;
-	std::string Msg;
-	if (!leo::LeoEval(*Expr, Resolver, V, Code, Msg))
-	{
-		UE_LOG(LogLeoNarrative, Error, TEXT("边条件求值失败: %s —— 视为假"), *Condition);
-		return false;
-	}
-	if (V.Kind != leo::FLeoValue::EKind::Bool)
-	{
-		UE_LOG(LogLeoNarrative, Error, TEXT("边条件结果非 Bool: %s —— 视为假"), *Condition);
-		return false;
-	}
-	return V.B;
 }
 
 // ---- 双档体系 ----
@@ -363,8 +384,14 @@ bool ULeoNarrativeSubsystem::SaveProgress()
 		return false;
 	}
 	ULeoProgressSaveGame* P = Cast<ULeoProgressSaveGame>(UGameplayStatics::CreateSaveGameObject(ULeoProgressSaveGame::StaticClass()));
-	P->GraphAsset = ActiveGraph ? FSoftObjectPath(ActiveGraph) : FSoftObjectPath();
-	P->GraphNodeId = CurrentGraphNodeId;
+	for (const FLeoGraphFrame& Frame : GraphStack)
+	{
+		if (Frame.Graph)
+		{
+			P->GraphAssets.Add(FSoftObjectPath(Frame.Graph));
+			P->GraphNodeIds.Add(Frame.NodeId);
+		}
+	}
 	P->Chapter = ActiveVM->GetChapter();
 	if (!ActiveVM->GetAnchor(P->AnchorLabel, P->AnchorOffset))
 	{
@@ -398,19 +425,29 @@ bool ULeoNarrativeSubsystem::LoadProgressAndResume()
 	}
 	LoadGlobal(); // 全局黑板（好感度等）先就位，边条件才有依据
 
-	if (P->GraphAsset.IsValid())
+	GraphStack.Reset();
 	{
-		ULeoScenarioGraph* Graph = Cast<ULeoScenarioGraph>(P->GraphAsset.TryLoad());
-		if (Graph)
+		const int32 N = FMath::Min(P->GraphAssets.Num(), P->GraphNodeIds.Num());
+		for (int32 i = 0; i < N; ++i)
 		{
-			ActiveGraph = Graph;
-			CurrentGraphNodeId = P->GraphNodeId;
-			EdgeExprCache.Reset();
+			if (ULeoScenarioGraph* G = Cast<ULeoScenarioGraph>(P->GraphAssets[i].TryLoad()))
+			{
+				FLeoGraphFrame& Frame = GraphStack.AddDefaulted_GetRef();
+				Frame.Graph = G;
+				Frame.NodeId = P->GraphNodeIds[i];
+			}
 		}
-	}
-	else
-	{
-		ActiveGraph = nullptr;
+		// 旧档兼容：单图字段
+		if (GraphStack.Num() == 0 && P->GraphAsset.IsValid())
+		{
+			if (ULeoScenarioGraph* G = Cast<ULeoScenarioGraph>(P->GraphAsset.TryLoad()))
+			{
+				FLeoGraphFrame& Frame = GraphStack.AddDefaulted_GetRef();
+				Frame.Graph = G;
+				Frame.NodeId = P->GraphNodeId;
+			}
+		}
+		EdgeExprCache.Reset();
 	}
 
 	if (!StartChapterAt(P->Chapter, P->AnchorLabel, P->AnchorOffset))
@@ -522,8 +559,8 @@ void ULeoNarrativeSubsystem::GetDebugSnapshot(FLeoDebugSnapshot& Out) const
 	Out.bAuto = bAuto;
 	Out.bSkip = bSkip;
 	Out.ReadTextCount = ReadTextIds.Num();
-	Out.bGraphActive = ActiveGraph != nullptr;
-	Out.GraphNode = CurrentGraphNodeId.ToString();
+	Out.bGraphActive = IsGraphActive();
+	Out.GraphNode = GetCurrentGraphNode().ToString();
 	Out.CustomCommands = RegisteredCommandNames;
 	Out.EventLog = EventLog;
 

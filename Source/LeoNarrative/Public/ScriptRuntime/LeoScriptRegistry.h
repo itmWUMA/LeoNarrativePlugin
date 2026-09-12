@@ -17,6 +17,8 @@ public:
 	int32 LoadAndCompileAll();
 	// 单章重编译（编辑器热校验/热重载用）
 	bool RecompileChapter(FName Chapter);
+	// 内存编译注入（测试/演示用：不落盘，直接入注册表；同名覆盖）
+	bool CompileMemory(FName Chapter, const FString& Source);
 
 	bool TryGetProgram(FName Chapter, TSharedPtr<leo::FLeoProgram>& OutProgram) const;
 	bool HasChapter(FName Chapter) const;

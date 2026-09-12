@@ -233,7 +233,24 @@ static ULeoNarrativeSubsystem* GetLeoSubsystemForSeqDemo()
 
 static void RunSeqDemo(ULeoNarrativeSubsystem* S, ULeoSequencerPerformer* Perf)
 {
-	if (!S->StartChapter(TEXT("chapter03"))) { return; }
+	// 演示章节内存注入（不依赖 Content/Scripts 的用户内容）
+	const TCHAR* DemoChapter = TEXT(R"LEO(
+label intro
+text - | 深夜，实验室的灯忽然亮起。
+seq lab_intro_cut wait=1 rate=1.0
+jumpif seq >= 1 -> cut_done
+text - | （过场资源缺席——叙事兜底分支继续推进。）
+jump outro
+
+label cut_done
+text - | 过场播完，镜头拉回对话。
+
+label outro
+text - | 本章结束。
+end
+)LEO");
+	S->GetRegistry()->CompileMemory(TEXT("demo_seq_ch"), DemoChapter);
+	if (!S->StartChapter(TEXT("demo_seq_ch"))) { return; }
 
 	// 合成序列：空轨道 + 0.5s 播放区间（测试缝注入，不经过清单）
 	ULevelSequence* Seq = NewObject<ULevelSequence>();
@@ -244,7 +261,7 @@ static void RunSeqDemo(ULeoNarrativeSubsystem* S, ULeoSequencerPerformer* Perf)
 		MS->SetPlaybackRange(FFrameNumber(0), Duration);
 	}
 	Perf->SetSequenceOverride(TEXT("lab_intro_cut"), Seq);
-	UE_LOG(LogLeoSequencer, Display, TEXT("[demo-seq] chapter03 开始：合成序列 0.5s 后自然完成"));
+	UE_LOG(LogLeoSequencer, Display, TEXT("[demo-seq] demo_seq_ch 开始：合成序列 0.5s 后自然完成"));
 
 	static FTSTicker::FDelegateHandle DemoHandle;
 	FTSTicker::GetCoreTicker().RemoveTicker(DemoHandle);
@@ -274,7 +291,7 @@ static void RunSeqDemo(ULeoNarrativeSubsystem* S, ULeoSequencerPerformer* Perf)
 		{
 			leo::FLeoValue V;
 			const bool bOk = VM->GetLocalBlackboard() && VM->GetLocalBlackboard()->GetValue(TEXT("seq"), V) && V.AsDouble() >= 1.0;
-			UE_LOG(LogLeoSequencer, Display, TEXT("[demo-seq] chapter03 完结（%s 分支）"),
+			UE_LOG(LogLeoSequencer, Display, TEXT("[demo-seq] demo_seq_ch 完结（%s 分支）"),
 				bOk ? TEXT("过场播完 cut_done") : TEXT("兜底"));
 			return false;
 		}

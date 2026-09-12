@@ -66,3 +66,9 @@ void SetCustomCommandSpecs(const TArray<FLeoCmdSpec>& Specs)
 }
 
 } // namespace LeoBridge
+
+bool LeoBridge::EvalExpr(const leo::FLeoExprPtr& Expr, const leo::FLeoVarResolver& Resolver,
+	leo::FLeoValue& OutValue, leo::ELeoDiag& OutCode, std::string& OutMsg)
+{
+	return leo::LeoEval(*Expr, Resolver, OutValue, OutCode, OutMsg);
+}

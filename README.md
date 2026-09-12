@@ -15,7 +15,7 @@
 - **表现层可替换**：VM 只广播事件；框架自带 Stage / Audio / Sequencer 适配器与纯 C++ 对话 UI，可整体换成你自己的
 - **框架预注册 `seq` 命令**：Level Sequencer 过场一行接入（播完回传断点，缺资源永不软锁）
 - **自定义命令扩展点**：严格 spec 编译期校验参数 + 处理器三态返回（Next / Suspend / Halt）——任何非 VN 玩法段零框架改动接入
-- **ScenarioGraph 编排**：数据资产定义"节点（章节+label）+ 条件边（.leo 表达式）"，多章节流程图
+- **ScenarioGraph 编排（节点类型化 + 专属编辑器）**：Chapter / Branch（纯条件分流）/ Ending（结局终态，`OnGraphFinished` 广播）/ Subgraph（子图嵌套复用）；边带条件 + 优先级 + 转移副作用（set/setg）；双击图资产打开**专属编辑器**——节点列表 / 自绘画布（拖拽布局）/ Details 直编 / **干跑模拟**（沙箱变量 + 单步 + 每条出边真假）+ PIE 从选中节点运行；图校验（悬空边 / 死端 / 章节引用 / Ending 可达）集成进 LeoValidate
 - **双档存读**：进度档（图位置 + VM 锚点 label+offset + 局部黑板快照）与全局档（已读文本 + 全局变量）分离；锚点对文本插行鲁棒
 - **编辑器工具链**：剧本热校验 watcher、校验中心面板（含清单/资产引用核对）、叙事调试器面板（VM/黑板/事件流/手动驱动/存档查看）
 - **CI 三件套**：`LeoValidate` 校验命令行 · `LeoRun` 无头运行器（命令行创建 GameInstance 泵帧整章回归）· golden 语料 + 纯内核宿主测试

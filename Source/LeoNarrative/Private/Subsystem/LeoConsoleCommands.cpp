@@ -181,7 +181,7 @@ static FAutoConsoleCommand GLeoLoad(
 	}));
 
 static FAutoConsoleCommand GLeoGraph(
-	TEXT("leo.graph"), TEXT("运行演示编排图: leo.graph demo（复用 chapter01 的 label 组成多节点图）"),
+	TEXT("leo.graph"), TEXT("运行类型化演示编排图: leo.graph demo（Chapter/Branch/Subgraph/Ending 四种节点 + 边副作用，自动播完）"),
 	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
 	{
 		if (Args.Num() < 1 || Args[0] != TEXT("demo"))
@@ -191,29 +191,107 @@ static FAutoConsoleCommand GLeoGraph(
 		}
 		ULeoNarrativeSubsystem* S = GetLeoSubsystem();
 		if (!S) { return; }
-		// 内存中构建演示图：intro → (好感度分支) → good/bad → finale
+		// 演示章节（内存注入，不依赖 Content/Scripts 的用户内容）
+		const TCHAR* DemoChapter = TEXT(R"LEO(
+label start
+setg affection = 0
+text - | 图演示：做出选择。
+choice
+    微笑 -> yes
+    沉默 -> no
+
+label yes
+setg affection += 1
+text - | 你选择了微笑。
+end
+
+label no
+text - | 你保持了沉默。
+end
+)LEO");
+		S->GetRegistry()->CompileMemory(TEXT("demo_graph_ch"), DemoChapter);
+		// 内存构建类型化演示图：
+		// n_intro(Chapter 整章) → n_route(Branch 好感度分流，边副作用写 route)
+		//   ├─ affection>=1 → n_recall(Subgraph 子图) → e_true(Ending true_end)
+		//   └─ 其他        → e_normal(Ending normal_end)
+		// 子图 G2: n_r1(Chapter demo_graph_ch@no) → e_inner(Ending，仅收束子图)
+		ULeoScenarioGraph* G2 = NewObject<ULeoScenarioGraph>(S);
+		G2->EntryNode = TEXT("n_r1");
+		{
+			FLeoScenarioNode R1;
+			R1.Id = TEXT("n_r1"); R1.Type = ELeoScenarioNodeType::Chapter;
+			R1.Chapter = TEXT("demo_graph_ch"); R1.Label = TEXT("no"); R1.Caption = INVTEXT("回忆片段");
+			FLeoScenarioEdge RE; RE.To = TEXT("e_inner");
+			R1.Edges = { RE };
+			FLeoScenarioNode R2;
+			R2.Id = TEXT("e_inner"); R2.Type = ELeoScenarioNodeType::Ending; R2.EndingId = TEXT("inner");
+			G2->Nodes = { R1, R2 };
+		}
+
 		ULeoScenarioGraph* G = NewObject<ULeoScenarioGraph>(S);
 		G->EntryNode = TEXT("n_intro");
+		{
+			FLeoScenarioNode N1;
+			N1.Id = TEXT("n_intro"); N1.Type = ELeoScenarioNodeType::Chapter;
+			N1.Chapter = TEXT("demo_graph_ch"); N1.Caption = INVTEXT("序章：整章（含选项）");
+			FLeoScenarioEdge E1; E1.To = TEXT("n_route"); E1.Priority = 0;
+			N1.Edges = { E1 };
 
-		FLeoScenarioNode N1;
-		N1.Id = TEXT("n_intro"); N1.Chapter = TEXT("chapter01"); N1.Caption = INVTEXT("序章：整章（含选项）");
-		FLeoScenarioEdge E1; E1.To = TEXT("n_good"); E1.Condition = TEXT("affection >= 1"); E1.Priority = 10;
-		FLeoScenarioEdge E2; E2.To = TEXT("n_bad");  E2.Condition = TEXT(""); E2.Priority = 0;
-		N1.Edges = { E1, E2 };
+			FLeoScenarioNode N2;
+			N2.Id = TEXT("n_route"); N2.Type = ELeoScenarioNodeType::Branch; N2.Caption = INVTEXT("好感度分流");
+			FLeoScenarioEdge B1;
+			B1.To = TEXT("n_recall"); B1.Condition = TEXT("affection >= 1"); B1.Priority = 10;
+			FLeoEdgeAction A1; A1.Key = TEXT("route"); A1.bGlobal = true; A1.Op = TEXT("="); A1.Expr = TEXT("\"recall\"");
+			B1.Actions = { A1 };
+			FLeoScenarioEdge B2;
+			B2.To = TEXT("e_normal"); B2.Priority = 0;
+			FLeoEdgeAction A2; A2.Key = TEXT("route"); A2.bGlobal = true; A2.Op = TEXT("="); A2.Expr = TEXT("\"normal\"");
+			B2.Actions = { A2 };
+			N2.Edges = { B1, B2 };
 
-		FLeoScenarioNode N2;
-		N2.Id = TEXT("n_good"); N2.Chapter = TEXT("chapter01"); N2.Label = TEXT("branch_yes"); N2.Caption = INVTEXT("好感线");
-		FLeoScenarioEdge E3; E3.To = TEXT("n_finale"); E3.Priority = 0;
-		N2.Edges = { E3 };
+			FLeoScenarioNode N3;
+			N3.Id = TEXT("n_recall"); N3.Type = ELeoScenarioNodeType::Subgraph;
+			N3.SubGraph = G2; N3.Caption = INVTEXT("回忆篇（子图）");
+			FLeoScenarioEdge E3; E3.To = TEXT("e_true"); E3.Priority = 0;
+			N3.Edges = { E3 };
 
-		FLeoScenarioNode N3;
-		N3.Id = TEXT("n_bad"); N3.Chapter = TEXT("chapter01"); N3.Label = TEXT("branch_silent"); N3.Caption = INVTEXT("沉默线");
-		FLeoScenarioEdge E4; E4.To = TEXT("n_finale"); E4.Priority = 0;
-		N3.Edges = { E4 };
+			FLeoScenarioNode N4;
+			N4.Id = TEXT("e_true"); N4.Type = ELeoScenarioNodeType::Ending; N4.EndingId = TEXT("true_end");
+			FLeoScenarioNode N5;
+			N5.Id = TEXT("e_normal"); N5.Type = ELeoScenarioNodeType::Ending; N5.EndingId = TEXT("normal_end");
 
-		FLeoScenarioNode N4;
-		N4.Id = TEXT("n_finale"); N4.Chapter = TEXT("chapter01"); N4.Label = TEXT("lab_ending"); N4.Caption = INVTEXT("尾声");
-
-		G->Nodes = { N1, N2, N3, N4 };
+			G->Nodes = { N1, N2, N3, N4, N5 };
+		}
+		// 完结报告（去重注册，重复运行 demo 不累积）
+		static FDelegateHandle DemoGraphFinishHandle;
+		S->OnGraphFinished.Remove(DemoGraphFinishHandle);
+		DemoGraphFinishHandle = S->OnGraphFinished.AddLambda([](FName EndingId)
+		{
+			UE_LOG(LogTemp, Display, TEXT("[demo-graph] 图完结，结局 = %s"),
+				EndingId.IsNone() ? TEXT("(无)") : *EndingId.ToString());
+		});
 		S->StartGraph(G);
+
+		// 自动播完（含外部断点处理），便于无头验证
+		RunWhenSubsystemReady([S](ULeoNarrativeSubsystem*)
+		{
+			static FTSTicker::FDelegateHandle GraphDemoHandle;
+			FTSTicker::GetCoreTicker().RemoveTicker(GraphDemoHandle);
+			GraphDemoHandle = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([S](float Dt)
+			{
+				ULeoVM* VM = S->GetActiveVM();
+				if (!VM || !S->IsGraphActive()) { return false; }
+				switch (VM->GetState())
+				{
+				case ELeoVMState::WaitClick: S->Advance(); break;
+				case ELeoVMState::WaitChoice: S->Choose(0); break; // 选 0 → branch_yes → affection=1
+				case ELeoVMState::WaitExternal:
+					S->ResumeWith(VM->GetSuspendToken(), leo::FLeoValue::MakeInt(0));
+					break;
+				case ELeoVMState::Finished: break; // 章末由子系统接管推进图
+				default: break;
+				}
+				return true;
+			}));
+		});
 	}));

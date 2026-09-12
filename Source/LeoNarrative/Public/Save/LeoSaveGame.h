@@ -37,7 +37,11 @@ class ULeoProgressSaveGame : public USaveGame
 {
 	GENERATED_BODY()
 public:
-	UPROPERTY() FSoftObjectPath GraphAsset;  // 空表示非图模式（单章直跑）
+	// 图调用栈（Subgraph 嵌套，末位为当前帧）；空表示非图模式（单章直跑）
+	UPROPERTY() TArray<FSoftObjectPath> GraphAssets;
+	UPROPERTY() TArray<FName> GraphNodeIds;
+	// 旧版单图字段（读档兼容；新档不再写）
+	UPROPERTY() FSoftObjectPath GraphAsset;
 	UPROPERTY() FName GraphNodeId;
 	UPROPERTY() FName Chapter;
 	UPROPERTY() FName AnchorLabel;

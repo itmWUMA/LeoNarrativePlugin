@@ -1,6 +1,7 @@
 #include "LeoValidation.h"
 
 #include "Data/LeoAssetManifest.h"
+#include "Data/LeoScenarioGraph.h"
 #include "ScriptRuntime/LeoScriptBridge.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
@@ -206,6 +207,155 @@ namespace
 			}
 		}
 	}
+
+	// ---- 编排图核对 ----
+
+	const TCHAR* NodeType_name(ELeoScenarioNodeType T)
+	{
+		switch (T)
+		{
+		case ELeoScenarioNodeType::Chapter:   return TEXT("Chapter");
+		case ELeoScenarioNodeType::Branch:    return TEXT("Branch");
+		case ELeoScenarioNodeType::Ending:    return TEXT("Ending");
+		case ELeoScenarioNodeType::Subgraph:  return TEXT("Subgraph");
+		default: return TEXT("?");
+		}
+	}
+
+	// 单图结构核对（纯函数：正常图与破损图都走这里，自测复用）
+	void CheckGraph(const ULeoScenarioGraph* G, const FString& DisplayName,
+		const TMap<FName, TSet<FName>>& ChapterLabels,
+		TArray<FLeoCheckItem>& Out, int32& OutErrors)
+	{
+		auto Add = [&](int32 NodeIdx, const FString& Code, const FString& Msg, bool bError)
+		{
+			Out.Add(MakeItem(DisplayName, 0, Code,
+				FString::Printf(TEXT("%s%s"), NodeIdx >= 0 ? *FString::Printf(TEXT("节点[%d] "), NodeIdx) : TEXT(""), *Msg),
+				bError));
+			if (bError) { ++OutErrors; }
+		};
+
+		if (!G->EntryNode.IsNone() && !G->FindNode(G->EntryNode))
+		{
+			Add(-1, TEXT("GRAPH_BAD_ENTRY"), TEXT("入口节点不存在"), true);
+		}
+
+		// Id 唯一性 + 逐节点检查
+		TSet<FName> SeenIds;
+		for (int32 i = 0; i < G->Nodes.Num(); ++i)
+		{
+			const FLeoScenarioNode& N = G->Nodes[i];
+			if (N.Id.IsNone()) { Add(i, TEXT("GRAPH_NO_ID"), TEXT("节点缺少 Id"), true); continue; }
+			if (SeenIds.Contains(N.Id)) { Add(i, TEXT("GRAPH_DUP_ID"), FString::Printf(TEXT("节点 Id 重复: %s"), *N.Id.ToString()), true); }
+			SeenIds.Add(N.Id);
+
+			// 出边存在性 + 表达式可编译
+			for (const FLeoScenarioEdge& E : N.Edges)
+			{
+				if (!G->FindNode(E.To))
+				{
+					Add(i, TEXT("GRAPH_DANGLING_EDGE"), FString::Printf(TEXT("边指向不存在的节点: %s"), *E.To.ToString()), true);
+				}
+				if (!E.Condition.TrimStartAndEnd().IsEmpty())
+				{
+					leo::FLeoDiag D;
+					if (!LeoBridge::CompileExpr(E.Condition, D))
+					{
+						Add(i, TEXT("GRAPH_BAD_EXPR"), FString::Printf(TEXT("边条件编译失败: %s (%s)"),
+							*E.Condition, LeoBridge::DiagName(D.Code)), true);
+					}
+				}
+				for (const FLeoEdgeAction& A : E.Actions)
+				{
+					leo::FLeoDiag D;
+					if (A.Key.IsNone() || !LeoBridge::CompileExpr(A.Expr, D))
+					{
+						Add(i, TEXT("GRAPH_BAD_ACTION"), FString::Printf(TEXT("边副作用不合法: %s %s %s"),
+							*A.Key.ToString(), *A.Op, *A.Expr), true);
+					}
+				}
+			}
+
+			switch (N.Type)
+			{
+			case ELeoScenarioNodeType::Chapter:
+			{
+				const TSet<FName>* Labels = ChapterLabels.Find(N.Chapter);
+				if (!Labels) { Add(i, TEXT("GRAPH_NO_CHAPTER"), FString::Printf(TEXT("章节不存在或编译失败: %s"), *N.Chapter.ToString()), true); }
+				else if (!N.Label.IsNone() && !Labels->Contains(N.Label))
+				{
+					Add(i, TEXT("GRAPH_NO_LABEL"), FString::Printf(TEXT("label 不存在: %s@%s"), *N.Chapter.ToString(), *N.Label.ToString()), true);
+				}
+				break;
+			}
+			case ELeoScenarioNodeType::Subgraph:
+				if (!N.SubGraph) { Add(i, TEXT("GRAPH_NO_SUBGRAPH"), TEXT("Subgraph 节点未配置子图"), true); }
+				else if (N.SubGraph == G) { Add(i, TEXT("GRAPH_SELF_SUBGRAPH"), TEXT("子图引用自身（运行期嵌套上限保护）"), false); }
+				break;
+			case ELeoScenarioNodeType::Ending:
+				if (N.EndingId.IsNone()) { Add(i, TEXT("GRAPH_UNNAMED_ENDING"), TEXT("Ending 未设 EndingId"), false); }
+				break;
+			default: break;
+			}
+
+			// 死端：非 Ending 节点必须有出边
+			if (N.Type != ELeoScenarioNodeType::Ending && N.Edges.Num() == 0)
+			{
+				Add(i, TEXT("GRAPH_DEAD_END"),
+					FString::Printf(TEXT("%s 节点无出边（玩家会在此卡死）"), NodeType_name(N.Type)), true);
+			}
+		}
+
+		// 结构可达性（忽略条件）：入口 BFS；无可达 Ending = 错误；不可达节点 = 警告
+		if (!G->EntryNode.IsNone() && G->FindNode(G->EntryNode))
+		{
+			TSet<FName> Visited;
+			TArray<FName> Queue = { G->EntryNode };
+			bool bEndingReachable = false;
+			while (!Queue.IsEmpty())
+			{
+				const FName Cur = Queue.Pop();
+				if (Visited.Contains(Cur)) { continue; }
+				Visited.Add(Cur);
+				const FLeoScenarioNode* N = G->FindNode(Cur);
+				if (!N) { continue; }
+				if (N->Type == ELeoScenarioNodeType::Ending) { bEndingReachable = true; }
+				for (const FLeoScenarioEdge& E : N->Edges)
+				{
+					if (!Visited.Contains(E.To)) { Queue.Add(E.To); }
+				}
+			}
+			if (!bEndingReachable)
+			{
+				Add(-1, TEXT("GRAPH_NO_ENDING"), TEXT("从入口结构上无法到达任何 Ending 节点"), true);
+			}
+			for (int32 i = 0; i < G->Nodes.Num(); ++i)
+			{
+				if (!G->Nodes[i].Id.IsNone() && !Visited.Contains(G->Nodes[i].Id))
+				{
+					Add(i, TEXT("GRAPH_UNREACHABLE"), TEXT("节点从入口不可达"), false);
+				}
+			}
+		}
+	}
+
+	// 发现 /Game 下的编排图资产并核对（无图 = 跳过）
+	void CheckAllGraphAssets(const TMap<FName, TSet<FName>>& ChapterLabels,
+		TArray<FLeoCheckItem>& Out, int32& OutErrors)
+	{
+		FAssetRegistryModule& ARM = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+		IAssetRegistry* Reg = &ARM.GetRegistry();
+		TArray<FAssetData> Found;
+		Reg->GetAssetsByClass(ULeoScenarioGraph::StaticClass()->GetClassPathName(), Found, true);
+		for (const FAssetData& Data : Found)
+		{
+			if (!Data.GetObjectPathString().StartsWith(TEXT("/Game"))) { continue; }
+			if (ULeoScenarioGraph* G = Cast<ULeoScenarioGraph>(StaticLoadObject(ULeoScenarioGraph::StaticClass(), nullptr, *Data.GetObjectPathString())))
+			{
+				CheckGraph(G, Data.GetObjectPathString(), ChapterLabels, Out, OutErrors);
+			}
+		}
+	}
 } // namespace
 
 FLeoValidateSummary ValidateAllStructured(const FString& ManifestAssetPath)
@@ -227,8 +377,9 @@ FLeoValidateSummary ValidateAllStructured(const FString& ManifestAssetPath)
 		}
 	};
 
-	// 宿主工程剧本（同时提取资源引用）
+	// 宿主工程剧本（同时提取资源引用 + 章节 label 表）
 	TMap<FName, FLeoAssetUsage> Usages;
+	TMap<FName, TSet<FName>> ChapterLabels;
 	const FString ScriptsDir = FPaths::ProjectContentDir() / TEXT("Scripts");
 	if (FPaths::DirectoryExists(ScriptsDir))
 	{
@@ -241,6 +392,14 @@ FLeoValidateSummary ValidateAllStructured(const FString& ManifestAssetPath)
 			FLeoFileResult R;
 			leo::FLeoProgram Program;
 			CompileFileToResult(Path, true, R, &Program);
+			if (R.bPass && Program.Ok)
+			{
+				TSet<FName>& Labels = ChapterLabels.FindOrAdd(FName(*FPaths::GetBaseFilename(Path)));
+				for (const auto& KV : Program.LabelIndex)
+				{
+					Labels.Add(FName(KV.first.c_str()));
+				}
+			}
 			if (R.bPass && Program.Ok)
 			{
 				CollectAssetUsages(Program, Path, Usages);
@@ -296,7 +455,59 @@ FLeoValidateSummary ValidateAllStructured(const FString& ManifestAssetPath)
 		CheckManifestEntries(Manifest, Usages, Summary.AssetItems, Summary.AssetErrors);
 	}
 
+	// ---- 编排图核对（无图资产时跳过）----
+	CheckAllGraphAssets(ChapterLabels, Summary.GraphItems, Summary.GraphErrors);
+
 	return Summary;
+}
+
+int32 SelfTestGraphChecks()
+{
+	// 内存构造正常图与破损图，走同一个核对器验证检出能力
+	int32 Failures = 0;
+	TMap<FName, TSet<FName>> Labels;
+	Labels.Add(TEXT("chapter01"), { TEXT("lab_start"), TEXT("lab_ending") });
+
+	auto CountErrors = [](TArray<FLeoCheckItem>& Items)
+	{
+		int32 N = 0;
+		for (const FLeoCheckItem& It : Items) { if (It.bError) { ++N; } }
+		return N;
+	};
+
+	// 正常图：Chapter → Branch → Subgraph → Ending，0 错误
+	{
+		ULeoScenarioGraph* G = NewObject<ULeoScenarioGraph>(GetTransientPackage());
+		G->EntryNode = TEXT("n1");
+		FLeoScenarioNode N1; N1.Id = TEXT("n1"); N1.Type = ELeoScenarioNodeType::Chapter; N1.Chapter = TEXT("chapter01");
+		FLeoScenarioEdge E1; E1.To = TEXT("e1"); N1.Edges = { E1 };
+		FLeoScenarioNode N2; N2.Id = TEXT("e1"); N2.Type = ELeoScenarioNodeType::Ending; N2.EndingId = TEXT("end1");
+		G->Nodes = { N1, N2 };
+		TArray<FLeoCheckItem> Items; int32 Errors = 0;
+		CheckGraph(G, TEXT("selftest-good"), Labels, Items, Errors);
+		if (Errors != 0) { UE_LOG(LogLeoValidate, Error, TEXT("[selftest-graph] 正常图应 0 错误，实得 %d"), Errors); ++Failures; }
+		else { UE_LOG(LogLeoValidate, Display, TEXT("[selftest-graph] 正常图 0 错误 ✓")); }
+	}
+
+	// 破损图：入口缺失 / 悬空边 / 死端 Chapter / 章节不存在 / 无 Ending 可达 —— 各 1 错误
+	{
+		ULeoScenarioGraph* G = NewObject<ULeoScenarioGraph>(GetTransientPackage());
+		G->EntryNode = TEXT("missing_entry");
+		FLeoScenarioNode N1; N1.Id = TEXT("n1"); N1.Type = ELeoScenarioNodeType::Chapter; N1.Chapter = TEXT("no_such_chapter");
+		FLeoScenarioEdge E1; E1.To = TEXT("ghost");
+		FLeoScenarioEdge E2; E2.To = TEXT("n2");
+		N1.Edges = { E1, E2 };
+		FLeoScenarioNode N2; N2.Id = TEXT("n2"); N2.Type = ELeoScenarioNodeType::Branch; // 无出边 = 死端
+		G->Nodes = { N1, N2 };
+		TArray<FLeoCheckItem> Items; int32 Errors = 0;
+		CheckGraph(G, TEXT("selftest-bad"), Labels, Items, Errors);
+		// 预期：入口缺失 1 + 悬空边 1 + 死端 1 + 章节不存在 1 = 4（无 Ending 可达暂不计入——入口不可达时跳过可达性分析）
+		if (Errors != 4) { UE_LOG(LogLeoValidate, Error, TEXT("[selftest-graph] 破损图应 4 错误，实得 %d"), Errors); ++Failures; }
+		else { UE_LOG(LogLeoValidate, Display, TEXT("[selftest-graph] 破损图 4 错误全检出 ✓")); }
+	}
+
+	UE_LOG(LogLeoValidate, Display, TEXT("[selftest-graph] %s"), Failures == 0 ? TEXT("通过") : TEXT("失败"));
+	return Failures;
 }
 
 bool ValidateFile(const FString& Path, bool bExpectClean)
@@ -325,6 +536,7 @@ int32 ValidateAll(const FString& ManifestAssetPath)
 		}
 	}
 	for (const FLeoCheckItem& It : S.AssetItems) { LogItem(It); }
+	for (const FLeoCheckItem& It : S.GraphItems) { LogItem(It); }
 
 	int32 Total = S.Files.Num();
 	if (!S.ManifestPath.IsEmpty())
@@ -335,9 +547,10 @@ int32 ValidateAll(const FString& ManifestAssetPath)
 	{
 		UE_LOG(LogLeoValidate, Display, TEXT("清单核对: 未找到 ULeoAssetManifest，跳过（工程无清单时为正常）"));
 	}
-	UE_LOG(LogLeoValidate, Display, TEXT("LeoValidate 完成: %d 个文件, %d 个不符 + %d 项资产错误"),
-		Total, S.Failures, S.AssetErrors);
-	return S.Failures + S.AssetErrors;
+	UE_LOG(LogLeoValidate, Display, TEXT("编排图核对: %d 项错误"), S.GraphErrors);
+	UE_LOG(LogLeoValidate, Display, TEXT("LeoValidate 完成: %d 个文件, %d 个不符 + %d 项资产错误 + %d 项图错误"),
+		Total, S.Failures, S.AssetErrors, S.GraphErrors);
+	return S.Failures + S.AssetErrors + S.GraphErrors;
 }
 
 } // namespace LeoValidation

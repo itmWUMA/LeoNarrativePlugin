@@ -54,8 +54,24 @@ static FAutoConsoleCommand GLeoDemoInvestigate(
 	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
 	{
 		ULeoNarrativeSubsystem* S = GetLeoSubsystemForDemo();
-		if (!S || !S->StartChapter(TEXT("chapter02"))) { return; }
-		UE_LOG(LogTemp, Display, TEXT("[demo] chapter02 开始：0.5s 后自动完成调查（发现 2 条线索）"));
+		if (!S) { return; }
+		// 演示章节内存注入（不依赖 Content/Scripts 的用户内容）
+		const TCHAR* DemoChapter = TEXT(R"LEO(
+label lab_enter
+text - | 夜晚的办公室，你决定搜查这里。
+investigate scene_office mode=strict
+jumpif investigation >= 2 -> lab_solved
+text - | 一无所获……明天再来吧。
+end
+
+label lab_solved
+setg clues_found = 1
+text - | 你在抽屉深处找到了关键证据！
+end
+)LEO");
+		S->GetRegistry()->CompileMemory(TEXT("demo_investigate_ch"), DemoChapter);
+		if (!S->StartChapter(TEXT("demo_investigate_ch"))) { return; }
+		UE_LOG(LogTemp, Display, TEXT("[demo] demo_investigate_ch 开始：0.5s 后自动完成调查（发现 2 条线索）"));
 
 		static FTSTicker::FDelegateHandle DemoHandle;
 		FTSTicker::GetCoreTicker().RemoveTicker(DemoHandle);
@@ -81,7 +97,7 @@ static FAutoConsoleCommand GLeoDemoInvestigate(
 				break;
 			}
 			case ELeoVMState::Finished:
-				UE_LOG(LogTemp, Display, TEXT("[demo] chapter02 完结（调查成功分支）"));
+				UE_LOG(LogTemp, Display, TEXT("[demo] demo_investigate_ch 完结（调查成功分支）"));
 				return false;
 			default:
 				break;
