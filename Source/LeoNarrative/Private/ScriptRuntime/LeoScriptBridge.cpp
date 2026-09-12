@@ -45,4 +45,24 @@ void SetCustomCommandNames(const TArray<FString>& Names)
 	leo::SetCustomCommandNames(StdNames);
 }
 
+void SetCustomCommandSpecs(const TArray<FLeoCmdSpec>& Specs)
+{
+	std::vector<leo::FLeoCommandSpec> StdSpecs;
+	StdSpecs.reserve(Specs.Num());
+	for (const FLeoCmdSpec& S : Specs)
+	{
+		leo::FLeoCommandSpec Std;
+		Std.Name = ToUtf8(S.Name);
+		Std.MinArgs = S.MinArgs;
+		Std.MaxArgs = S.MaxArgs;
+		Std.AllowedParams.reserve(S.AllowedParams.Num());
+		for (const FString& P : S.AllowedParams)
+		{
+			Std.AllowedParams.push_back(ToUtf8(P));
+		}
+		StdSpecs.push_back(std::move(Std));
+	}
+	leo::SetCustomCommandSpecs(StdSpecs);
+}
+
 } // namespace LeoBridge

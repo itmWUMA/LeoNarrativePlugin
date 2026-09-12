@@ -6,13 +6,19 @@
 #include "CoreMinimal.h"
 #include "Blackboard/NarrativeBlackboard.h"
 #include "Script/LeoProgram.h"
+#include "ScriptRuntime/LeoScriptBridge.h"
 #include "VM/LeoEvents.h"
 #include "LeoVM.generated.h"
 
 namespace ELeoVMState
 {
-	enum Type : uint8_t { Idle, Running, WaitClick, WaitTimer, WaitChoice, Finished };
+	// WaitClick/WaitTimer/WaitChoice 是三个内置断点的语法糖；
+	// WaitExternal = 任意注册玩法断点（Suspend/ResumeWith），ADV 非 VN 玩法段的挂起点
+	enum Type : uint8_t { Idle, Running, WaitClick, WaitTimer, WaitChoice, WaitExternal, Finished };
 }
+
+// 自定义命令处理结果：瞬时完成 / 挂起为外部断点 / 终止章节
+enum class ELeoCustomResult : uint8_t { Next, Suspend, Halt };
 
 UCLASS()
 class LEONARRATIVE_API ULeoVM : public UObject
@@ -21,7 +27,8 @@ class LEONARRATIVE_API ULeoVM : public UObject
 
 public:
 	// 自定义命令处理器（Command 模式的扩展点：命令是数据，行为注册进表）
-	using FCustomHandler = TFunction<void(ULeoVM&, const leo::FLeoCommand&)>;
+	// 返回 Next=瞬时完成；Suspend=已调用 Suspend() 挂起等玩法结果；Halt=终止章节
+	using FCustomHandler = TFunction<ELeoCustomResult(ULeoVM&, const leo::FLeoCommand&)>;
 
 	void Init(FName InChapter, const TSharedPtr<leo::FLeoProgram>& InProgram,
 	          UNarrativeBlackboard* InLocal, UNarrativeBlackboard* InGlobal);
@@ -34,6 +41,17 @@ public:
 	// WaitChoice → 记录选择到黑板 last_choice，跳转到选项目标
 	bool Choose(int32 Index);
 
+	// ---- 外部断点（玩法段挂起/恢复）----
+	// 处理器内调用：把 VM 挂起为命名断点（token 须为标识符）
+	bool Suspend(FName Token);
+	// 玩法层完成时经子系统调用：payload 写入局部黑板键 <token>，脚本用 jumpif 分流；
+	// 与 choice→last_choice 同一模式——VM 指针不被外部驱动
+	bool ResumeWith(FName Token, const leo::FLeoValue& Payload);
+	FName GetSuspendToken() const { return SuspendToken; }
+
+	// 广播 Custom 事件（CustomName + ExtraParams 自动从命令参数袋填充）
+	void EmitCustomEvent(const leo::FLeoCommand& C);
+
 	ELeoVMState::Type GetState() const { return State; }
 	FName GetChapter() const { return Chapter; }
 	int32 GetPC() const { return PC; }
@@ -44,8 +62,13 @@ public:
 	bool GetAnchor(FName& OutLabel, int32& OutOffset) const;
 	bool RestoreAnchor(FName Label, int32 Offset);
 
-	// 全局自定义命令注册（进程级；须在编译剧本前注册名字）
+	// 全局自定义命令注册（进程级；命令名须在编译剧本前注册）
+	// 严格模式：带编译期参数校验（spec）；宽松模式：只注册名字
+	static void RegisterCustomCommand(FName Name, const LeoBridge::FLeoCmdSpec& Spec, FCustomHandler Handler);
 	static void RegisterCustomHandler(FName Name, FCustomHandler Handler);
+	// 供注册表在编译前取用（返回 FString 便于注册表直接消费）
+	static TArray<FString> GetLenientCommandNames();
+	static TArray<LeoBridge::FLeoCmdSpec> GetStrictCommandSpecs();
 
 	// 事件出口（子系统转发给表现层）
 	FLeoEventSignature OnEvent;
@@ -54,7 +77,14 @@ private:
 	enum class EResult : uint8_t { Next, Jumped, Block, Halt };
 	using FHandler = EResult (ULeoVM::*)(const leo::FLeoCommand&);
 	static TMap<leo::ELeoCmd, FHandler>& HandlerTable();
-	static TMap<FName, FCustomHandler>& CustomTable();
+
+	struct FLeoCustomEntry
+	{
+		bool bStrict = false;
+		LeoBridge::FLeoCmdSpec Spec;
+		FCustomHandler Handler;
+	};
+	static TMap<FName, FLeoCustomEntry>& CustomCommands();
 
 	EResult HandleNop(const leo::FLeoCommand& C);
 	EResult HandleText(const leo::FLeoCommand& C);
@@ -83,6 +113,8 @@ private:
 	int32 PC = 0;
 	ELeoVMState::Type State = ELeoVMState::Idle;
 	float WaitRemaining = 0.f;
+	// 当前挂起断点标识：内置 "click"/"timer"/"choice"，外部为注册的玩法 token
+	FName SuspendToken;
 	// 阻塞恢复语义：PC 停在阻塞命令上（存档锚点重放该命令），
 	// 恢复运行时需跳过它一次，避免重复执行
 	bool bNeedSkipCurrent = false;

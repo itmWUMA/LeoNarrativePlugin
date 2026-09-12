@@ -30,15 +30,49 @@ TMap<leo::ELeoCmd, ULeoVM::FHandler>& ULeoVM::HandlerTable()
 	return Table;
 }
 
-TMap<FName, ULeoVM::FCustomHandler>& ULeoVM::CustomTable()
+TMap<FName, ULeoVM::FLeoCustomEntry>& ULeoVM::CustomCommands()
 {
-	static TMap<FName, FCustomHandler> Table;
+	static TMap<FName, FLeoCustomEntry> Table;
 	return Table;
+}
+
+void ULeoVM::RegisterCustomCommand(FName Name, const LeoBridge::FLeoCmdSpec& Spec, FCustomHandler Handler)
+{
+	FLeoCustomEntry& E = CustomCommands().FindOrAdd(Name);
+	E.bStrict = true;
+	E.Spec = Spec;
+	E.Handler = std::move(Handler);
+	// 注册即镜像到纯内核——命令行校验（LeoValidate）等非游戏路径也能编译含自定义命令的剧本
+	LeoBridge::SetCustomCommandSpecs(GetStrictCommandSpecs());
+	LeoBridge::SetCustomCommandNames(GetLenientCommandNames());
 }
 
 void ULeoVM::RegisterCustomHandler(FName Name, FCustomHandler Handler)
 {
-	CustomTable().Add(Name, std::move(Handler));
+	FLeoCustomEntry& E = CustomCommands().FindOrAdd(Name);
+	E.bStrict = false;
+	E.Handler = std::move(Handler);
+	LeoBridge::SetCustomCommandNames(GetLenientCommandNames());
+}
+
+TArray<FString> ULeoVM::GetLenientCommandNames()
+{
+	TArray<FString> Names;
+	for (const TPair<FName, FLeoCustomEntry>& KV : CustomCommands())
+	{
+		if (!KV.Value.bStrict) { Names.Add(KV.Key.ToString()); }
+	}
+	return Names;
+}
+
+TArray<LeoBridge::FLeoCmdSpec> ULeoVM::GetStrictCommandSpecs()
+{
+	TArray<LeoBridge::FLeoCmdSpec> Specs;
+	for (const TPair<FName, FLeoCustomEntry>& KV : CustomCommands())
+	{
+		if (KV.Value.bStrict) { Specs.Add(KV.Value.Spec); }
+	}
+	return Specs;
 }
 
 void ULeoVM::Init(FName InChapter, const TSharedPtr<leo::FLeoProgram>& InProgram,
@@ -65,6 +99,7 @@ void ULeoVM::Tick(float DeltaSeconds)
 		if (WaitRemaining <= 0.f)
 		{
 			if (bNeedSkipCurrent) { ++PC; bNeedSkipCurrent = false; }
+			SuspendToken = NAME_None;
 			State = ELeoVMState::Running;
 		}
 	}
@@ -104,8 +139,53 @@ bool ULeoVM::Advance()
 {
 	if (State != ELeoVMState::WaitClick) { return false; }
 	if (bNeedSkipCurrent) { ++PC; bNeedSkipCurrent = false; }
+	SuspendToken = NAME_None;
 	State = ELeoVMState::Running;
 	return true;
+}
+
+// ---- 外部断点 ----
+
+bool ULeoVM::Suspend(FName Token)
+{
+	// 只允许在命令执行期间（Running）挂起——即处理器内部调用
+	if (State != ELeoVMState::Running) { return false; }
+	SuspendToken = Token;
+	State = ELeoVMState::WaitExternal;
+	return true;
+}
+
+bool ULeoVM::ResumeWith(FName Token, const leo::FLeoValue& Payload)
+{
+	if (State != ELeoVMState::WaitExternal || SuspendToken != Token) { return false; }
+	// 结果写黑板，由脚本读黑板分流（铁律：外部不驱动 VM 指针）
+	if (LocalBB)
+	{
+		LocalBB->SetValue(Token, Payload);
+	}
+	if (bNeedSkipCurrent) { ++PC; bNeedSkipCurrent = false; }
+	SuspendToken = NAME_None;
+	State = ELeoVMState::Running;
+	return true;
+}
+
+void ULeoVM::EmitCustomEvent(const leo::FLeoCommand& C)
+{
+	FLeoEvent Ev;
+	Ev.Kind = ELeoEventKind::Custom;
+	Ev.CustomName = FName(C.CustomName.c_str());
+	Ev.Chapter = Chapter;
+	Ev.Line = C.Line;
+	for (const leo::FLeoParam& P : C.Params)
+	{
+		Ev.ExtraParams.Add(FName(P.Key.c_str()), LeoBridge::ToFString(P.Value));
+	}
+	for (size_t i = 0; i < C.CustomArgs.size(); ++i)
+	{
+		Ev.ExtraParams.Add(FName(*FString::Printf(TEXT("arg%d"), static_cast<int32>(i))),
+			LeoBridge::ToFString(C.CustomArgs[i]));
+	}
+	OnEvent.Broadcast(Ev);
 }
 
 bool ULeoVM::Choose(int32 Index)
@@ -133,6 +213,7 @@ bool ULeoVM::Choose(int32 Index)
 	PC = Opt.TargetIndex;
 	ActiveOptions.Reset();
 	bNeedSkipCurrent = false; // PC 已被跳转设置，无需跳过
+	SuspendToken = NAME_None;
 	State = ELeoVMState::Running;
 	return true;
 }
@@ -162,6 +243,7 @@ bool ULeoVM::RestoreAnchor(FName Label, int32 Offset)
 	PC = Target;
 	bNeedSkipCurrent = false; // 锚点重放：从 Target 命令开始重新执行
 	ActiveOptions.Reset();
+	SuspendToken = NAME_None;
 	State = ELeoVMState::Running;
 	return true;
 }
@@ -200,6 +282,7 @@ ULeoVM::EResult ULeoVM::HandleText(const leo::FLeoCommand& C)
 	Ev.Text = LeoBridge::ToFString(C.Body);
 	Ev.TextId = FString::Printf(TEXT("%s/%s/%d"), *Chapter.ToString(), *Label.ToString(), Seq);
 	Broadcast(std::move(Ev));
+	SuspendToken = TEXT("click");
 	State = ELeoVMState::WaitClick;
 	return EResult::Block;
 }
@@ -287,6 +370,7 @@ ULeoVM::EResult ULeoVM::HandleVoice(const leo::FLeoCommand& C)
 ULeoVM::EResult ULeoVM::HandleWait(const leo::FLeoCommand& C)
 {
 	WaitRemaining = static_cast<float>(C.Millis) / 1000.f;
+	SuspendToken = TEXT("timer");
 	State = ELeoVMState::WaitTimer;
 	return EResult::Block;
 }
@@ -373,6 +457,7 @@ ULeoVM::EResult ULeoVM::HandleChoice(const leo::FLeoCommand& C)
 		Ev.Options.Add(std::move(EO));
 	}
 	Broadcast(std::move(Ev));
+	SuspendToken = TEXT("choice");
 	State = ELeoVMState::WaitChoice;
 	return EResult::Block;
 }
@@ -390,13 +475,30 @@ ULeoVM::EResult ULeoVM::HandleEnd(const leo::FLeoCommand& C)
 
 ULeoVM::EResult ULeoVM::HandleCustom(const leo::FLeoCommand& C)
 {
-	FCustomHandler* H = CustomTable().Find(FName(C.CustomName.c_str()));
-	if (!H)
+	FLeoCustomEntry* E = CustomCommands().Find(FName(C.CustomName.c_str()));
+	if (!E || !E->Handler)
 	{
 		RuntimeError(leo::ELeoDiag::E_UNKNOWN_CMD, C.Line, "自定义命令没有注册运行时处理器: " + C.CustomName);
 		return EResult::Halt;
 	}
-	(*H)(*this, C);
+	const ELeoCustomResult R = E->Handler(*this, C);
+	switch (R)
+	{
+	case ELeoCustomResult::Next:
+		return EResult::Next;
+	case ELeoCustomResult::Suspend:
+		// 处理器应已调用 Suspend() 挂起
+		if (State != ELeoVMState::WaitExternal)
+		{
+			RuntimeError(leo::ELeoDiag::E_TYPE, C.Line,
+				"自定义命令返回 Suspend 但未调用 Suspend(): " + C.CustomName);
+			return EResult::Halt;
+		}
+		return EResult::Block;
+	case ELeoCustomResult::Halt:
+		State = ELeoVMState::Finished;
+		return EResult::Halt;
+	}
 	return EResult::Next;
 }
 

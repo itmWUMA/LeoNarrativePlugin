@@ -4,6 +4,7 @@
 
 #include <charconv>
 #include <cstdio>
+#include <map>
 #include <set>
 #include <string_view>
 
@@ -535,15 +536,38 @@ namespace
 		static std::set<std::string> S;
 		return S;
 	}
+	std::map<std::string, FLeoCommandSpec>& CustomSpecMap()
+	{
+		static std::map<std::string, FLeoCommandSpec> M;
+		return M;
+	}
+	const FLeoCommandSpec* FindCustomSpec(const std::string& Name)
+	{
+		const auto It = CustomSpecMap().find(Name);
+		return It == CustomSpecMap().end() ? nullptr : &It->second;
+	}
 } // namespace
 
+void SetCustomCommandSpecs(const std::vector<FLeoCommandSpec>& Specs)
+{
+	CustomSpecMap().clear();
+	for (const FLeoCommandSpec& S : Specs)
+	{
+		CustomSpecMap()[S.Name] = S;
+	}
+	// 严格注册的命令同时从宽松名单移除，避免双注册歧义
+	for (const auto& KV : CustomSpecMap())
+	{
+		CustomNameSet().erase(KV.first);
+	}
+}
 void SetCustomCommandNames(const std::vector<std::string>& Names)
 {
 	CustomNameSet() = std::set<std::string>(Names.begin(), Names.end());
 }
 bool IsCustomCommandName(const std::string& Name)
 {
-	return CustomNameSet().count(Name) > 0;
+	return CustomNameSet().count(Name) > 0 || CustomSpecMap().count(Name) > 0;
 }
 
 FLeoExprPtr CompileExprSrc(const std::string& ExprSrc, FLeoDiag& OutDiag)
@@ -567,7 +591,7 @@ FLeoProgram CompileChapter(const std::string& SourceUtf8, const std::string& Sou
 	FCompileCtx C;
 	C.Prog.SourceName = SourceName;
 
-	bool bEnded = false;
+	bool bSawEnd = false;      // 全文件至少一个 end（E_MISSING_END）
 	bool bInChoice = false;
 	size_t ChoiceIdx = 0;
 	auto CloseChoiceAt = [&](int AtLine)
@@ -614,11 +638,6 @@ FLeoProgram CompileChapter(const std::string& SourceUtf8, const std::string& Sou
 		const size_t First = Line.find_first_not_of(' ');
 		if (First == std::string::npos) { continue; } // 空行
 		if (Line[First] == '#') { continue; }         // 整行注释
-		if (bEnded)
-		{
-			C.AddDiag(ELeoDiag::E_AFTER_END, LineNo, "end 之后不允许再出现内容");
-			continue;
-		}
 		if (First % 4 != 0)
 		{
 			C.AddDiag(ELeoDiag::E_INDENT, LineNo, "缩进空格数必须是 4 的倍数");
@@ -976,37 +995,79 @@ FLeoProgram CompileChapter(const std::string& SourceUtf8, const std::string& Sou
 			}
 			Cmd.Kind = ELeoCmd::End;
 			C.Prog.Commands.push_back(std::move(Cmd));
-			bEnded = true;
+			bSawEnd = true; // end = 该执行路径终止；允许多个（多分支章节），解析继续
 			continue;
 		}
 		if (IsCustomCommandName(Head))
 		{
-			// 自定义命令：通用规则解析（位置参数原文 + key=value）
+			// 自定义命令：有 spec 走严格校验（编辑期报错带行号），无 spec 走宽松解析
 			Cmd.Kind = ELeoCmd::Custom;
 			Cmd.CustomName = Head;
-			for (size_t i = 1; i < T.size(); ++i)
+			const FLeoCommandSpec* Spec = FindCustomSpec(Head);
+			bool bOk = true;
+			if (Spec)
 			{
-				if (i + 2 < T.size() && T[i].Type == ETok::Word &&
-					T[i + 1].Type == ETok::Op && T[i + 1].Text == "=" &&
-					(T[i + 2].Type == ETok::Word || T[i + 2].Type == ETok::Int || T[i + 2].Type == ETok::Float || T[i + 2].Type == ETok::Str))
+				const size_t PStart = FindParamStart(T, 1);
+				const size_t PosCount = PStart - 1;
+				if (PosCount < static_cast<size_t>(Spec->MinArgs) ||
+				    (Spec->MaxArgs >= 0 && PosCount > static_cast<size_t>(Spec->MaxArgs)))
 				{
-					FLeoParam P;
-					P.Key = T[i].Text;
-					P.Value = T[i + 2].Text;
-					Cmd.Params.push_back(std::move(P));
-					i += 2;
+					C.AddDiag(ELeoDiag::E_ARG_COUNT, LineNo,
+						Head + " 需要 " + std::to_string(Spec->MinArgs) + ".." +
+						(Spec->MaxArgs < 0 ? std::string("N") : std::to_string(Spec->MaxArgs)) +
+						" 个位置参数（得到 " + std::to_string(PosCount) + "）");
 					continue;
 				}
-				if (T[i].Type == ETok::Word || T[i].Type == ETok::Int || T[i].Type == ETok::Float || T[i].Type == ETok::Str)
+				for (size_t i = 1; i < PStart; ++i)
 				{
-					Cmd.CustomArgs.push_back(T[i].Text);
+					if (T[i].Type == ETok::Word || T[i].Type == ETok::Int || T[i].Type == ETok::Float || T[i].Type == ETok::Str)
+					{
+						Cmd.CustomArgs.push_back(T[i].Text);
+					}
+					else
+					{
+						C.AddDiag(ELeoDiag::E_ARG_BAD, LineNo, "位置参数类型非法: '" + T[i].Text + "'");
+						bOk = false;
+					}
 				}
-				else
+				if (bOk && !ParseParams(C, T, PStart, Cmd.Params, LineNo)) { bOk = false; }
+				if (bOk)
 				{
-					C.AddDiag(ELeoDiag::E_ARG_BAD, LineNo, "自定义命令参数非法: '" + T[i].Text + "'");
+					const size_t DiagCountBefore = C.Prog.Diags.size();
+					CheckAllowedParams(C, Cmd.Params, Spec->AllowedParams, LineNo);
+					bOk = C.Prog.Diags.size() == DiagCountBefore;
 				}
 			}
-			C.Prog.Commands.push_back(std::move(Cmd));
+			else
+			{
+				// 宽松：位置参数原文 + 任意 key=value
+				for (size_t i = 1; i < T.size(); ++i)
+				{
+					if (i + 2 < T.size() && T[i].Type == ETok::Word &&
+						T[i + 1].Type == ETok::Op && T[i + 1].Text == "=" &&
+						(T[i + 2].Type == ETok::Word || T[i + 2].Type == ETok::Int || T[i + 2].Type == ETok::Float || T[i + 2].Type == ETok::Str))
+					{
+						FLeoParam P;
+						P.Key = T[i].Text;
+						P.Value = T[i + 2].Text;
+						Cmd.Params.push_back(std::move(P));
+						i += 2;
+						continue;
+					}
+					if (T[i].Type == ETok::Word || T[i].Type == ETok::Int || T[i].Type == ETok::Float || T[i].Type == ETok::Str)
+					{
+						Cmd.CustomArgs.push_back(T[i].Text);
+					}
+					else
+					{
+						C.AddDiag(ELeoDiag::E_ARG_BAD, LineNo, "自定义命令参数非法: '" + T[i].Text + "'");
+					}
+				}
+			}
+			if (bOk)
+			{
+				C.Prog.Commands.push_back(std::move(Cmd));
+			}
 			continue;
 		}
 
@@ -1015,9 +1076,9 @@ FLeoProgram CompileChapter(const std::string& SourceUtf8, const std::string& Sou
 
 	// EOF 收尾
 	CloseChoiceAt(LineNo + 1);
-	if (!bEnded)
+	if (!bSawEnd)
 	{
-		C.AddDiag(ELeoDiag::E_MISSING_END, LineNo, "缺少 end");
+		C.AddDiag(ELeoDiag::E_MISSING_END, LineNo, "缺少 end（全文件至少一个）");
 	}
 
 	// ---------- 后置校验：跳转目标回填 + 警告 ----------
@@ -1063,10 +1124,13 @@ FLeoProgram CompileChapter(const std::string& SourceUtf8, const std::string& Sou
 	}
 	for (size_t i = 0; i + 1 < C.Prog.Commands.size(); ++i)
 	{
-		if (C.Prog.Commands[i].Kind == ELeoCmd::Jump && C.Prog.Commands[i + 1].Kind != ELeoCmd::Label)
+		// 无条件跳转/终止后的命令不可达（除非有 label 落在其上供跳入）
+		const bool bUnconditionalHalt =
+			C.Prog.Commands[i].Kind == ELeoCmd::Jump || C.Prog.Commands[i].Kind == ELeoCmd::End;
+		if (bUnconditionalHalt && C.Prog.Commands[i + 1].Kind != ELeoCmd::Label)
 		{
 			C.AddDiag(ELeoDiag::W_Unreachable, C.Prog.Commands[i + 1].Line,
-				"无条件跳转后的命令不可达（如需落在此处请加 label）");
+				"无条件跳转/终止后的命令不可达（如需落在此处请加 label）");
 		}
 	}
 

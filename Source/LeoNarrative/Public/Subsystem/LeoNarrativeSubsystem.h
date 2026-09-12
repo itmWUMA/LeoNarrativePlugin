@@ -59,6 +59,14 @@ public:
 	bool IsGraphActive() const { return ActiveGraph != nullptr; }
 	FName GetCurrentGraphNode() const { return CurrentGraphNodeId; }
 
+	// ---- 自定义命令与玩法断点 ----
+	// 严格注册：编译期按 spec 校验参数（编辑期报错带行号）
+	void RegisterCommand(FName Name, const LeoBridge::FLeoCmdSpec& Spec, ULeoVM::FCustomHandler Handler);
+	// 宽松注册（只登记名字，参数不校验）
+	void RegisterCommandHandler(FName Name, ULeoVM::FCustomHandler Handler);
+	// 玩法断点恢复：payload 写局部黑板键 <token>，脚本 jumpif 分流
+	bool ResumeWith(FName Token, const leo::FLeoValue& Payload);
+
 	// ---- 双档体系 ----
 	bool SaveGlobal();             // 全局档：已读文本 ID + 全局黑板
 	bool LoadGlobal();
@@ -67,9 +75,6 @@ public:
 
 	// 重新扫描编译剧本（编辑器热重载）
 	bool ReloadScripts();
-
-	// 自定义命令注册（编译前注册名字 + 运行前注册处理器）
-	void RegisterCommandHandler(FName Name, ULeoVM::FCustomHandler Handler);
 
 	// 表现层订阅入口（UI/Stage/Audio 全部从这里拿事件）
 	FLeoEventSignature OnLeoEvent;
@@ -84,6 +89,7 @@ private:
 	void RunGraphNode(FName NodeId);
 	void AdvanceGraph();
 	bool EvalEdgeCondition(const FString& Condition);
+	void RefreshCommandRegistry(); // 把 VM 静态命令表同步给编译注册表
 
 	UPROPERTY()
 	TObjectPtr<UNarrativeBlackboard> GlobalBB;

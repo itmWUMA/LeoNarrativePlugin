@@ -27,9 +27,9 @@ namespace
 
 int32 ULeoScriptRegistry::LoadAndCompileAll()
 {
-	// 应用自定义命令名（须先于编译注册——parser 需要知道合法命令集）
-	TArray<FString> Names = CustomCommandNames;
-	LeoBridge::SetCustomCommandNames(Names);
+	// 应用自定义命令注册（须先于编译——parser 需要知道合法命令集与参数规则）
+	LeoBridge::SetCustomCommandSpecs(CustomCommandSpecs);
+	LeoBridge::SetCustomCommandNames(CustomCommandNames);
 
 	Programs.Reset();
 	LastDiags.Reset();
@@ -57,6 +57,7 @@ bool ULeoScriptRegistry::RecompileChapter(FName Chapter)
 		UE_LOG(LogLeoRegistry, Error, TEXT("重编译失败：找不到 %s"), *Path);
 		return false;
 	}
+	LeoBridge::SetCustomCommandSpecs(CustomCommandSpecs);
 	LeoBridge::SetCustomCommandNames(CustomCommandNames);
 	return CompileOne(Path);
 }

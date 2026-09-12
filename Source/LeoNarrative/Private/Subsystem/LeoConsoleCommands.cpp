@@ -69,9 +69,12 @@ static FAutoConsoleCommand GLeoState(
 		ULeoVM* VM = S->GetActiveVM();
 		FName Label; int32 Offset = 0;
 		VM->GetAnchor(Label, Offset);
-		const TCHAR* StateName[] = { TEXT("Idle"), TEXT("Running"), TEXT("WaitClick"), TEXT("WaitTimer"), TEXT("WaitChoice"), TEXT("Finished") };
-		UE_LOG(LogTemp, Display, TEXT("chapter=%s pc=%d anchor=%s+%d state=%s"),
-			*VM->GetChapter().ToString(), VM->GetPC(), *Label.ToString(), Offset, StateName[VM->GetState()]);
+		const TCHAR* StateName[] = { TEXT("Idle"), TEXT("Running"), TEXT("WaitClick"), TEXT("WaitTimer"), TEXT("WaitChoice"), TEXT("WaitExternal"), TEXT("Finished") };
+		const FString Extra = VM->GetState() == ELeoVMState::WaitExternal
+			? FString::Printf(TEXT(" token=%s"), *VM->GetSuspendToken().ToString())
+			: FString();
+		UE_LOG(LogTemp, Display, TEXT("chapter=%s pc=%d anchor=%s+%d state=%s%s"),
+			*VM->GetChapter().ToString(), VM->GetPC(), *Label.ToString(), Offset, StateName[VM->GetState()], *Extra);
 	}));
 
 static FAutoConsoleCommand GLeoReload(
@@ -98,7 +101,7 @@ static FAutoConsoleCommand GLeoAutoTest(
 
 		static FTSTicker::FDelegateHandle AutotestHandle;
 		FTSTicker::GetCoreTicker().RemoveTicker(AutotestHandle);
-		AutotestHandle = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([S](float)
+		AutotestHandle = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([S](float Dt)
 		{
 			ULeoVM* VM = S->GetActiveVM();
 			if (!VM)
@@ -106,11 +109,30 @@ static FAutoConsoleCommand GLeoAutoTest(
 				UE_LOG(LogTemp, Display, TEXT("[autotest] 会话结束"));
 				return false; // 停止 ticker
 			}
+			static float ExternalWait = 0.f;
 			switch (VM->GetState())
 			{
-			case ELeoVMState::WaitClick: S->Advance(); break;
-			case ELeoVMState::WaitChoice: S->Choose(0); break;
+			case ELeoVMState::WaitClick:
+				ExternalWait = 0.f;
+				S->Advance();
+				break;
+			case ELeoVMState::WaitChoice:
+				ExternalWait = 0.f;
+				S->Choose(0);
+				break;
+			case ELeoVMState::WaitExternal:
+				// 外部断点：0.3s 后以默认 payload 0 恢复（含玩法段的章节也能整章回归；
+				// 非默认结果值的分支用 leo.demo <名称> 或游戏侧测试驱动）
+				ExternalWait += Dt;
+				if (ExternalWait >= 0.3f)
+				{
+					ExternalWait = 0.f;
+					UE_LOG(LogTemp, Display, TEXT("[autotest] 外部断点 %s 以默认值 0 恢复"), *VM->GetSuspendToken().ToString());
+					S->ResumeWith(VM->GetSuspendToken(), leo::FLeoValue::MakeInt(0));
+				}
+				break;
 			case ELeoVMState::Finished:
+				ExternalWait = 0.f;
 				UE_LOG(LogTemp, Display, TEXT("[autotest] 完结: %s"), *VM->GetChapter().ToString());
 				return false;
 			default: break;

@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Script/LeoProgram.h"
+#include "ScriptRuntime/LeoScriptBridge.h"
 #include "LeoScriptRegistry.generated.h"
 
 UCLASS()
@@ -24,8 +25,9 @@ public:
 	// 最近一次编译的诊断（章节名 → 诊断列表），调试用
 	const TMap<FName, TArray<FString>>& GetLastDiags() const { return LastDiags; }
 
-	// 编译前需要应用的自定义命令名（由子系统设置）
-	TArray<FString> CustomCommandNames;
+	// 编译前需要应用的自定义命令注册（由子系统从 VM 静态表同步）
+	TArray<LeoBridge::FLeoCmdSpec> CustomCommandSpecs; // 严格：带参数校验
+	TArray<FString> CustomCommandNames;                 // 宽松：只登记名字
 
 private:
 	bool CompileOne(const FString& FilePath);

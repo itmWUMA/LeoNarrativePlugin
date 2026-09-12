@@ -2,11 +2,14 @@
 
 #include "LeoNarrative.h"
 
+#include "Examples/LeoInvestigationDemo.h"
+
 #define LOCTEXT_NAMESPACE "FLeoNarrativeModule"
 
 void FLeoNarrativeModule::StartupModule()
 {
-	// This code will execute after your module is loaded into memory; the exact timing is specified in the .uplugin file per-module
+	// 扩展示例：注册 investigate 自定义命令（须早于任何剧本编译）
+	LeoExamples::RegisterInvestigationDemo();
 }
 
 void FLeoNarrativeModule::ShutdownModule()

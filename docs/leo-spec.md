@@ -68,7 +68,7 @@
 | 11 | `set` | `set <name> <op> <expr>` | 否 | 写**局部**作用域。op ∈ `= += -= *= /=` |
 | 12 | `setg` | `setg <name> <op> <expr>` | 否 | 写**全局**作用域（跨章节存活，进全局档） |
 | 13 | `choice` | `choice` + 缩进选项行 | **等选择** | 见下方专项规则 |
-| 14 | `end` | `end` | 终止 | 章节结束。必须出现且仅出现一次；缺失 → `E_MISSING_END`，`end` 之后还有内容 → `E_AFTER_END` |
+| 14 | `end` | `end` | 终止 | 该执行路径终止。全文件至少一个 `end`（`E_MISSING_END`）；**允许多个**（多分支章节各自提前收束，v0.11 修订） |
 
 ### 5.1 `text` 专项规则
 
@@ -181,8 +181,7 @@ Primary = '(' Expr ')' | Int | Float | String | 'true' | 'false' | Identifier ;
 | `E_UNDEF_LABEL` | jump/jumpif/选项引用了不存在的 label |
 | `E_EMPTY_CHOICE` | choice 无选项 |
 | `E_NESTED_CHOICE` | choice 嵌套 |
-| `E_MISSING_END` | 缺少 `end` |
-| `E_AFTER_END` | `end` 之后存在非注释/空行内容 |
+| `E_MISSING_END` | 缺少 `end`（全文件至少一个） |
 | `E_IO` | 注册表读文件失败 |
 
 **运行时**
@@ -193,14 +192,44 @@ Primary = '(' Expr ')' | Int | Float | String | 'true' | 'false' | Identifier ;
 | `E_TYPE` | 运算类型不匹配 |
 | `E_DIV_ZERO` | 除零 / 模零 |
 
-**警告（不阻断）**：`W_UNREACHABLE`（无条件 jump 后紧跟非 label 行）、`W_UNUSED_LABEL`（从未被引用的 label）。
+**警告（不阻断）**：`W_UNREACHABLE`（无条件跳转/终止后紧跟非 label 行）、`W_UNUSED_LABEL`（从未被引用的 label）。
 
-## 10. 自定义命令扩展点
+## 10. 自定义命令与玩法断点（扩展点）
 
-- 编译前向 `leo::SetCustomCommandNames({...})` 注册命令名；语法解析按"位置参数 + key=value"通用规则。
-- 运行前向 `ULeoNarrativeSubsystem::RegisterCommandHandler(FName, Handler)` 注册处理函数；
-  未注册处理器的自定义命令在运行时按错误处理。
-- 自定义命令不得伪装成控制流（不得改写 PC）——与铁律冲突的扩展会被拒绝合入。
+框架不假设演出词汇表；非 VN 玩法（调查、QTE、小游戏）经此处接入，**不改框架源码**。
+
+### 10.1 编译期注册（严格模式，推荐）
+
+注册 `FLeoCommandSpec`：命令名、位置参数个数上下限（`Max=-1` 不限）、命名参数白名单（空 = 不允许命名参数）。
+违反 → 编辑期即报 `E_ARG_COUNT` / `E_BAD_PARAM` / `E_ARG_BAD`，带行号——扩展命令与内置命令拿到同等的前置校验。
+
+### 10.2 宽松模式（兼容）
+
+`SetCustomCommandNames` 只登记命令名，参数不做校验。
+
+### 10.3 运行期处理器（三态返回）
+
+- `Next`：瞬时完成，继续下一条命令；
+- `Suspend`：处理器先调用 `VM.Suspend(<token>)` 把 VM 挂起为**外部断点**（token 须为标识符），再返回 `Suspend`；
+- `Halt`：终止章节（处理器自行广播错误事件）。
+
+恢复：`ULeoNarrativeSubsystem::ResumeWith(token, payload)` —— payload 写入**局部黑板键 `<token>`**，
+脚本用 `jumpif` 读结果分流（与 choice→`last_choice` 同一模式；VM 指针不被外部驱动）。
+断点期间 `skip`/`auto` 不生效（玩法必须真实完成）。
+
+### 10.4 事件
+
+自定义命令广播 `Custom` 事件（`CustomName` + `ExtraParams` 参数袋：`arg0..N` 为位置参数、命名参数按名存入），
+玩法 UI / 表现层从事件流接手渲染。
+
+自定义命令不得伪装控制流（不得直接改写 PC）——与铁律冲突的扩展会被拒绝合入。
+
+### 10.5 示例（参见 Examples/LeoInvestigationDemo.cpp 与 Content/Scripts/chapter02.leo）
+
+```leo
+investigate scene_office mode=strict     # 挂起为 investigation 断点
+jumpif investigation >= 2 -> lab_solved  # 调查完成后按发现数分流
+```
 
 ## 11. 完整示例
 
@@ -244,4 +273,6 @@ end
 ## 12. 版本
 
 - v0.1（2026-09）：首个实现版本。收窄项：无 `text` 显式 ID 覆盖、无条件表达式语法糖、无本地化管道。
+- v0.11（2026-09-12，M6 通用化修订）：`end` 允许多个（多分支章节各自提前收束，删除 `E_AFTER_END`）；
+  新增自定义命令严格 spec 校验与玩法断点（Suspend/ResumeWith，§10）。
 - 规范改动流程：修改本文件 → 同步编译器 → 更新 golden 语料 → 跑 `LeoValidate` 回归。

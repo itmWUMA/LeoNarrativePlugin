@@ -18,7 +18,20 @@ FLeoProgram CompileChapter(const std::string& SourceUtf8, const std::string& Sou
 // 单独编译一段表达式（ScenarioGraph 边条件等复用）。失败返回 nullptr 并写 OutDiag。
 FLeoExprPtr CompileExprSrc(const std::string& ExprSrc, FLeoDiag& OutDiag);
 
-// 注册自定义命令名（须在 CompileChapter 之前调用；语法按"位置参数 + key=value"通用规则解析）。
+// 自定义命令的编译期规格（严格模式）：违反即编辑期报错，带行号。
+// 保持"载入时编译"对 AI 创作的价值——扩展命令同样拿到前置校验。
+struct FLeoCommandSpec
+{
+	std::string Name;
+	int MinArgs = 0;                      // 位置参数下限
+	int MaxArgs = 0;                      // 位置参数上限；-1 = 不限
+	std::vector<std::string> AllowedParams; // 命名参数白名单；空 = 不允许任何命名参数
+};
+
+// 严格注册：按 spec 校验参数（E_ARG_COUNT / E_BAD_PARAM / E_ARG_BAD）
+void SetCustomCommandSpecs(const std::vector<FLeoCommandSpec>& Specs);
+
+// 宽松注册（兼容旧接口）：只登记命令名，参数不校验。
 // 非线程安全：约定只在启动期调用。
 void SetCustomCommandNames(const std::vector<std::string>& Names);
 

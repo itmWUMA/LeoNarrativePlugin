@@ -16,6 +16,7 @@ enum class ELeoEventKind : uint8_t
 	ChoiceMade,  // 玩家已选择
 	ChapterEnd,
 	RuntimeError,
+	Custom,      // 自定义命令/玩法事件：CustomName + ExtraParams 参数袋
 };
 
 struct FLeoEventOption
@@ -49,6 +50,11 @@ struct FLeoEvent
 
 	// RuntimeError
 	FString DiagCode, DiagMsg;
+
+	// Custom（自定义命令/玩法事件）：命令名 + 通用参数袋。
+	// 新演出/玩法维度只往 ExtraParams 塞数据，事件结构体保持冻结。
+	FName CustomName;
+	TMap<FName, FString> ExtraParams;
 };
 
 DECLARE_MULTICAST_DELEGATE_OneParam(FLeoEventSignature, const FLeoEvent&);

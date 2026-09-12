@@ -18,6 +18,9 @@ void ULeoNarrativeSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	GlobalBB = NewObject<UNarrativeBlackboard>(this);
 	GlobalBB->AddToRoot(); // 全局黑板跨章节存活，防 GC
 	Registry = NewObject<ULeoScriptRegistry>(this);
+	// 模块启动期已注册的自定义命令（严格 spec / 宽松名单）先同步给注册表，再首次编译
+	Registry->CustomCommandSpecs = ULeoVM::GetStrictCommandSpecs();
+	Registry->CustomCommandNames = ULeoVM::GetLenientCommandNames();
 	Registry->LoadAndCompileAll();
 
 	// 表现层（事件订阅者；VM 广播 → 子系统转发 → 这里消费）
@@ -107,18 +110,35 @@ bool ULeoNarrativeSubsystem::Choose(int32 Index)
 bool ULeoNarrativeSubsystem::ReloadScripts()
 {
 	if (!Registry) { return false; }
-	Registry->CustomCommandNames = RegisteredCommandNames;
 	return Registry->LoadAndCompileAll() > 0 || Registry->GetChapterNames().Num() == 0;
+}
+
+void ULeoNarrativeSubsystem::RegisterCommand(FName Name, const LeoBridge::FLeoCmdSpec& Spec, ULeoVM::FCustomHandler Handler)
+{
+	ULeoVM::RegisterCustomCommand(Name, Spec, std::move(Handler));
+	RefreshCommandRegistry();
+	RegisteredCommandNames.AddUnique(Name.ToString());
 }
 
 void ULeoNarrativeSubsystem::RegisterCommandHandler(FName Name, ULeoVM::FCustomHandler Handler)
 {
 	ULeoVM::RegisterCustomHandler(Name, std::move(Handler));
+	RefreshCommandRegistry();
 	RegisteredCommandNames.AddUnique(Name.ToString());
+}
+
+void ULeoNarrativeSubsystem::RefreshCommandRegistry()
+{
 	if (Registry)
 	{
-		Registry->CustomCommandNames = RegisteredCommandNames;
+		Registry->CustomCommandSpecs = ULeoVM::GetStrictCommandSpecs();
+		Registry->CustomCommandNames = ULeoVM::GetLenientCommandNames();
 	}
+}
+
+bool ULeoNarrativeSubsystem::ResumeWith(FName Token, const leo::FLeoValue& Payload)
+{
+	return ActiveVM && ActiveVM->ResumeWith(Token, Payload);
 }
 
 void ULeoNarrativeSubsystem::HandleVMEvent(const FLeoEvent& Ev)
