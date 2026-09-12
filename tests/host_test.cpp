@@ -70,7 +70,11 @@ static void CheckDir(const fs::path& Dir, bool bExpectClean)
 int main()
 {
 	// ---- M6: 严格 spec 注册 + 宽松名单 ----
-	SetCustomCommandSpecs({ FLeoCommandSpec{ "investigate", 1, 1, { "mode" } } });
+	// （与运行时注册保持一致：investigate 见 Examples，seq 见 SequencerPerformer）
+	SetCustomCommandSpecs({
+		FLeoCommandSpec{ "investigate", 1, 1, { "mode" } },
+		FLeoCommandSpec{ "seq", 1, 1, { "wait", "rate", "start", "loop" } },
+	});
 	SetCustomCommandNames({ "mycmd" });
 
 	// 严格：合法用法

@@ -609,3 +609,67 @@ void ULeoVM::RuntimeError(leo::ELeoDiag Code, int32 Line, const std::string& Msg
 	UE_LOG(LogLeoVM, Error, TEXT("[VM] 运行时错误 %s(%d): %s"), *Chapter.ToString(), Line, *Ev.DiagMsg);
 	OnEvent.Broadcast(Ev);
 }
+
+// ---- 调试支持 ----
+
+const TCHAR* ULeoVM::StateName(ELeoVMState::Type S)
+{
+	static const TCHAR* Names[] =
+	{
+		TEXT("Idle"), TEXT("Running"), TEXT("WaitClick"), TEXT("WaitTimer"),
+		TEXT("WaitChoice"), TEXT("WaitExternal"), TEXT("Finished")
+	};
+	return Names[(int32)S];
+}
+
+int32 ULeoVM::GetCurrentLine() const
+{
+	if (!Program.IsValid() || PC < 0 || PC >= static_cast<int32>(Program->Commands.size())) { return 0; }
+	return Program->Commands[PC].Line;
+}
+
+FString ULeoVM::DescribeCurrentCommand() const
+{
+	if (!Program.IsValid() || PC < 0 || PC >= static_cast<int32>(Program->Commands.size())) { return FString(); }
+	const leo::FLeoCommand& C = Program->Commands[PC];
+	const FString A = LeoBridge::ToFString(C.AssetId);
+	switch (C.Kind)
+	{
+	case leo::ELeoCmd::Nop:     return TEXT("（空）");
+	case leo::ELeoCmd::Label:   return TEXT("label ") + LeoBridge::ToFString(C.Label);
+	case leo::ELeoCmd::Text:
+	{
+		FString S = LeoBridge::ToFString(C.Speaker);
+		FString B = LeoBridge::ToFString(C.Body);
+		if (B.Len() > 40) { B = B.Left(40) + TEXT("…"); }
+		return S.IsEmpty() ? TEXT("text | ") + B : TEXT("text | ") + S + TEXT(": ") + B;
+	}
+	case leo::ELeoCmd::Bg:      return TEXT("bg ") + A;
+	case leo::ELeoCmd::Char:    return TEXT("char ") + LeoBridge::ToFString(C.Slot) + TEXT(" ") + A;
+	case leo::ELeoCmd::Bgm:     return TEXT("bgm ") + A;
+	case leo::ELeoCmd::Se:      return TEXT("se ") + A;
+	case leo::ELeoCmd::Voice:   return TEXT("voice ") + A;
+	case leo::ELeoCmd::Wait:    return FString::Printf(TEXT("wait %dms"), C.Millis);
+	case leo::ELeoCmd::Jump:    return TEXT("jump -> ") + LeoBridge::ToFString(C.Label);
+	case leo::ELeoCmd::JumpIf:  return TEXT("jumpif … -> ") + LeoBridge::ToFString(C.Label);
+	case leo::ELeoCmd::Set:     return TEXT("set ") + LeoBridge::ToFString(C.Name) + TEXT(" ") + LeoBridge::ToFString(C.Op) + TEXT(" …");
+	case leo::ELeoCmd::SetG:    return TEXT("setg ") + LeoBridge::ToFString(C.Name) + TEXT(" ") + LeoBridge::ToFString(C.Op) + TEXT(" …");
+	case leo::ELeoCmd::Choice:
+	{
+		FString S = TEXT("choice");
+		for (const leo::FLeoOption& O : C.Options)
+		{
+			S += TEXT("\n    ") + LeoBridge::ToFString(O.Text);
+		}
+		return S;
+	}
+	case leo::ELeoCmd::End:     return TEXT("end");
+	case leo::ELeoCmd::Custom:
+	{
+		FString S = LeoBridge::ToFString(C.CustomName);
+		for (const std::string& Arg : C.CustomArgs) { S += TEXT(" ") + LeoBridge::ToFString(Arg); }
+		return S;
+	}
+	default:                    return TEXT("?");
+	}
+}

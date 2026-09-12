@@ -29,6 +29,9 @@ public class LeoNarrativeEditor : ModuleRules
 			"Projects",        // IPluginManager：定位插件目录下的 golden 语料
 			"DirectoryWatcher",// M5: Content/Scripts 热校验
 			"ToolMenus",       // M5: 编辑器菜单入口
+			"AssetRegistry",   // P0: 清单资产发现与存在性核对
+			"LevelSequence",   // P0: seq 逻辑名 → ULevelSequence 类型核对
+			"WorkspaceMenuStructure", // P0/P1: Nomad Tab 分组（Tools）
 		}
 		);
 	}

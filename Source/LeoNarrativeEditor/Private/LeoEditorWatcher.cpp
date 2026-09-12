@@ -101,4 +101,6 @@ void FLeoEditorWatcher::RecompilePending()
 		}
 	}
 	PendingFiles.Reset();
+	// 校验面板订阅此通知自动刷新
+	LeoValidation::OnScriptsRevalidated.Broadcast();
 }

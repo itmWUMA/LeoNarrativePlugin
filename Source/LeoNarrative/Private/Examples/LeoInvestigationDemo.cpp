@@ -3,7 +3,7 @@
 //   1) 编译期：FLeoCmdSpec 严格注册（参数错误在编辑期报出，带行号）
 //   2) 运行期：处理器广播 Custom 事件（参数袋）→ Suspend 挂起为外部断点
 //   3) 恢复：玩法层完成后 Subsystem->ResumeWith(token, 结果) → 结果写黑板 → 脚本 jumpif 分流
-// 用法：leo.demo investigate（走"调查成功"分支）；leo.autotest chapter02（默认 payload 0 走失败分支）
+// 用法：leo.demoinvestigate（走"调查成功"分支）；leo.autotest chapter02（默认 payload 0 走失败分支）
 #include "Examples/LeoInvestigationDemo.h"
 
 #include "Subsystem/LeoNarrativeSubsystem.h"
@@ -50,7 +50,7 @@ static ULeoNarrativeSubsystem* GetLeoSubsystemForDemo()
 }
 
 static FAutoConsoleCommand GLeoDemoInvestigate(
-	TEXT("leo.demo investigate"), TEXT("运行 chapter02 调查示例（自动恢复断点，payload=2 走成功分支）"),
+	TEXT("leo.demoinvestigate"), TEXT("运行 chapter02 调查示例（自动恢复断点，payload=2 走成功分支）"),
 	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
 	{
 		ULeoNarrativeSubsystem* S = GetLeoSubsystemForDemo();

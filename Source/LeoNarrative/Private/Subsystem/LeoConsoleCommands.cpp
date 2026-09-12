@@ -16,6 +16,18 @@ static ULeoNarrativeSubsystem* GetLeoSubsystem()
 	return nullptr;
 }
 
+// 等子系统就绪后再执行（-ExecCmds 在 frame 0 触发，GameInstance 可能尚未创建）
+static void RunWhenSubsystemReady(TFunction<void(ULeoNarrativeSubsystem*)> Fn)
+{
+	if (ULeoNarrativeSubsystem* S = GetLeoSubsystem()) { Fn(S); return; }
+	FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda(
+		[Fn = MoveTemp(Fn)](float)
+		{
+			if (ULeoNarrativeSubsystem* S = GetLeoSubsystem()) { Fn(S); return false; }
+			return true; // 未就绪，继续等
+		}));
+}
+
 static FAutoConsoleCommand GLeoStart(
 	TEXT("leo.start"), TEXT("开始章节: leo.start <chapter>"),
 	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
@@ -91,54 +103,55 @@ static FAutoConsoleCommand GLeoAutoTest(
 	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
 	{
 		if (Args.Num() < 1) { UE_LOG(LogTemp, Warning, TEXT("用法: leo.autotest <chapter>|resume")); return; }
-		ULeoNarrativeSubsystem* S = GetLeoSubsystem();
-		if (!S) { return; }
-		if (Args[0] != TEXT("resume"))
+		RunWhenSubsystemReady([Args](ULeoNarrativeSubsystem* S)
 		{
-			if (!S->StartChapter(*Args[0])) { return; }
-		}
-		UE_LOG(LogTemp, Display, TEXT("[autotest] 开始: %s"), *Args[0]);
+			if (Args[0] != TEXT("resume"))
+			{
+				if (!S->StartChapter(*Args[0])) { return; }
+			}
+			UE_LOG(LogTemp, Display, TEXT("[autotest] 开始: %s"), *Args[0]);
 
-		static FTSTicker::FDelegateHandle AutotestHandle;
-		FTSTicker::GetCoreTicker().RemoveTicker(AutotestHandle);
-		AutotestHandle = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([S](float Dt)
-		{
-			ULeoVM* VM = S->GetActiveVM();
-			if (!VM)
+			static FTSTicker::FDelegateHandle AutotestHandle;
+			FTSTicker::GetCoreTicker().RemoveTicker(AutotestHandle);
+			AutotestHandle = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([S](float Dt)
 			{
-				UE_LOG(LogTemp, Display, TEXT("[autotest] 会话结束"));
-				return false; // 停止 ticker
-			}
-			static float ExternalWait = 0.f;
-			switch (VM->GetState())
-			{
-			case ELeoVMState::WaitClick:
-				ExternalWait = 0.f;
-				S->Advance();
-				break;
-			case ELeoVMState::WaitChoice:
-				ExternalWait = 0.f;
-				S->Choose(0);
-				break;
-			case ELeoVMState::WaitExternal:
-				// 外部断点：0.3s 后以默认 payload 0 恢复（含玩法段的章节也能整章回归；
-				// 非默认结果值的分支用 leo.demo <名称> 或游戏侧测试驱动）
-				ExternalWait += Dt;
-				if (ExternalWait >= 0.3f)
+				ULeoVM* VM = S->GetActiveVM();
+				if (!VM)
 				{
-					ExternalWait = 0.f;
-					UE_LOG(LogTemp, Display, TEXT("[autotest] 外部断点 %s 以默认值 0 恢复"), *VM->GetSuspendToken().ToString());
-					S->ResumeWith(VM->GetSuspendToken(), leo::FLeoValue::MakeInt(0));
+					UE_LOG(LogTemp, Display, TEXT("[autotest] 会话结束"));
+					return false; // 停止 ticker
 				}
-				break;
-			case ELeoVMState::Finished:
-				ExternalWait = 0.f;
-				UE_LOG(LogTemp, Display, TEXT("[autotest] 完结: %s"), *VM->GetChapter().ToString());
-				return false;
-			default: break;
-			}
-			return true;
-		}));
+				static float ExternalWait = 0.f;
+				switch (VM->GetState())
+				{
+				case ELeoVMState::WaitClick:
+					ExternalWait = 0.f;
+					S->Advance();
+					break;
+				case ELeoVMState::WaitChoice:
+					ExternalWait = 0.f;
+					S->Choose(0);
+					break;
+				case ELeoVMState::WaitExternal:
+					// 外部断点：0.3s 后以默认 payload 0 恢复（含玩法段的章节也能整章回归；
+					// 非默认结果值的分支用 leo.demo <名称> 或游戏侧测试驱动）
+					ExternalWait += Dt;
+					if (ExternalWait >= 0.3f)
+					{
+						ExternalWait = 0.f;
+						UE_LOG(LogTemp, Display, TEXT("[autotest] 外部断点 %s 以默认值 0 恢复"), *VM->GetSuspendToken().ToString());
+						S->ResumeWith(VM->GetSuspendToken(), leo::FLeoValue::MakeInt(0));
+					}
+					break;
+				case ELeoVMState::Finished:
+					ExternalWait = 0.f;
+					UE_LOG(LogTemp, Display, TEXT("[autotest] 完结: %s"), *VM->GetChapter().ToString());
+					return false;
+				default: break;
+				}
+				return true;
+			}));
+		});
 	}));
 
 static FAutoConsoleCommand GLeoUI(

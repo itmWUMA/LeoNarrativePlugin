@@ -6,6 +6,7 @@
 #include "Presentation/LeoDialogueWidget.h"
 #include "Save/LeoSaveGame.h"
 #include "ScriptRuntime/LeoScriptBridge.h"
+#include "Stage/LeoSequencerPerformer.h"
 #include "Stage/LeoStage.h"
 #include "Kismet/GameplayStatics.h"
 
@@ -29,6 +30,10 @@ void ULeoNarrativeSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	Audio->SetWorldContext(GetGameInstance());
 	OnLeoEvent.AddUObject(Stage, &ULeoStage::HandleEvent);
 	OnLeoEvent.AddUObject(Audio, &ULeoAudioAdapter::HandleEvent);
+	Sequencer = NewObject<ULeoSequencerPerformer>(this);
+	Sequencer->SetOwner(this);
+	Sequencer->SetWorldContext(GetGameInstance());
+	OnLeoEvent.AddUObject(Sequencer, &ULeoSequencerPerformer::HandleEvent);
 
 	// GameInstanceSubsystem 没有 Tick，用核心 Ticker 驱动 VM（游戏线程）
 	TickerHandle = FTSTicker::GetCoreTicker().AddTicker(
@@ -143,6 +148,8 @@ bool ULeoNarrativeSubsystem::ResumeWith(FName Token, const leo::FLeoValue& Paylo
 
 void ULeoNarrativeSubsystem::HandleVMEvent(const FLeoEvent& Ev)
 {
+	// 调试器事件流（环形缓冲，先于转发记录）
+	AppendEventLog(Ev);
 	// 关键事件留 Display 级日志：无 UI 场景（命令行/自动化）也能看到叙事流
 	switch (Ev.Kind)
 	{
@@ -301,12 +308,6 @@ bool ULeoNarrativeSubsystem::EvalEdgeCondition(const FString& Condition)
 
 // ---- 双档体系 ----
 
-namespace
-{
-	const TCHAR* GGlobalSlot = TEXT("LeoNarrative/Global");
-	const TCHAR* GProgressSlot = TEXT("LeoNarrative/Progress");
-}
-
 bool ULeoNarrativeSubsystem::SaveGlobal()
 {
 	ULeoGlobalSaveGame* G = Cast<ULeoGlobalSaveGame>(UGameplayStatics::CreateSaveGameObject(ULeoGlobalSaveGame::StaticClass()));
@@ -321,7 +322,7 @@ bool ULeoNarrativeSubsystem::SaveGlobal()
 			G->VarValues.Add(FLeoSavedValue::From(KV.Value));
 		}
 	}
-	const bool bOk = UGameplayStatics::SaveGameToSlot(G, GGlobalSlot, 0);
+	const bool bOk = UGameplayStatics::SaveGameToSlot(G, GlobalSlotName(), 0);
 	UE_LOG(LogLeoNarrative, Display, TEXT("全局档保存%s（已读 %d 条 / 全局变量 %d 个）"),
 		bOk ? TEXT("成功") : TEXT("失败"), G->ReadTextIds.Num(), G->VarKeys.Num());
 	return bOk;
@@ -329,7 +330,7 @@ bool ULeoNarrativeSubsystem::SaveGlobal()
 
 bool ULeoNarrativeSubsystem::LoadGlobal()
 {
-	ULeoGlobalSaveGame* G = Cast<ULeoGlobalSaveGame>(UGameplayStatics::LoadGameFromSlot(GGlobalSlot, 0));
+	ULeoGlobalSaveGame* G = Cast<ULeoGlobalSaveGame>(UGameplayStatics::LoadGameFromSlot(GlobalSlotName(), 0));
 	if (!G)
 	{
 		UE_LOG(LogLeoNarrative, Warning, TEXT("全局档不存在或读取失败"));
@@ -377,7 +378,7 @@ bool ULeoNarrativeSubsystem::SaveProgress()
 		}
 	}
 	P->TimestampTicks = FDateTime::UtcNow().GetTicks();
-	const bool bOk = UGameplayStatics::SaveGameToSlot(P, GProgressSlot, 0);
+	const bool bOk = UGameplayStatics::SaveGameToSlot(P, ProgressSlotName(), 0);
 	UE_LOG(LogLeoNarrative, Display, TEXT("进度档保存%s（%s@%s+%d）"), bOk ? TEXT("成功") : TEXT("失败"),
 		*P->Chapter.ToString(), *P->AnchorLabel.ToString(), P->AnchorOffset);
 	return bOk;
@@ -385,7 +386,7 @@ bool ULeoNarrativeSubsystem::SaveProgress()
 
 bool ULeoNarrativeSubsystem::LoadProgressAndResume()
 {
-	ULeoProgressSaveGame* P = Cast<ULeoProgressSaveGame>(UGameplayStatics::LoadGameFromSlot(GProgressSlot, 0));
+	ULeoProgressSaveGame* P = Cast<ULeoProgressSaveGame>(UGameplayStatics::LoadGameFromSlot(ProgressSlotName(), 0));
 	if (!P)
 	{
 		UE_LOG(LogLeoNarrative, Warning, TEXT("进度档不存在或读取失败"));
@@ -435,6 +436,12 @@ void ULeoNarrativeSubsystem::SetManifest(ULeoAssetManifest* InManifest)
 	Manifest = InManifest;
 	if (Stage) { Stage->SetManifest(InManifest); }
 	if (Audio) { Audio->SetManifest(InManifest); }
+	if (Sequencer) { Sequencer->SetManifest(InManifest); }
+}
+
+void ULeoNarrativeSubsystem::SkipSequences()
+{
+	if (Sequencer) { Sequencer->StopAll(/*bResumeVM=*/true); }
 }
 
 void ULeoNarrativeSubsystem::ShowDialogueUI(bool bShow)
@@ -460,5 +467,93 @@ void ULeoNarrativeSubsystem::ShowDialogueUI(bool bShow)
 	{
 		DialogueWidget->RemoveFromParent();
 		DialogueWidget = nullptr;
+	}
+}
+
+// ---- 调试支持 ----
+
+void ULeoNarrativeSubsystem::AppendEventLog(const FLeoEvent& Ev)
+{
+	FString S;
+	switch (Ev.Kind)
+	{
+	case ELeoEventKind::ChapterStart: S = FString::Printf(TEXT("── 章节开始 %s"), *Ev.Chapter.ToString()); break;
+	case ELeoEventKind::Text:
+		S = Ev.Speaker.IsEmpty()
+			? FString::Printf(TEXT("[文本] %s"), *Ev.Text)
+			: FString::Printf(TEXT("[文本] %s：%s"), *Ev.Speaker, *Ev.Text);
+		break;
+	case ELeoEventKind::Bg:    S = FString::Printf(TEXT("[背景] %s"), *Ev.AssetId.ToString()); break;
+	case ELeoEventKind::Char:  S = FString::Printf(TEXT("[立绘] %s %s"), *Ev.Slot, *Ev.AssetId.ToString()); break;
+	case ELeoEventKind::Bgm:   S = FString::Printf(TEXT("[BGM] %s"), *Ev.AssetId.ToString()); break;
+	case ELeoEventKind::Se:    S = FString::Printf(TEXT("[SE] %s"), *Ev.AssetId.ToString()); break;
+	case ELeoEventKind::Voice: S = FString::Printf(TEXT("[语音] %s"), *Ev.AssetId.ToString()); break;
+	case ELeoEventKind::ChoiceShown:
+		S = FString::Printf(TEXT("[选项] %d 项"), Ev.Options.Num());
+		break;
+	case ELeoEventKind::ChoiceMade: S = FString::Printf(TEXT("[选择] %d"), Ev.ChoiceIndex); break;
+	case ELeoEventKind::ChapterEnd: S = FString::Printf(TEXT("── 章节结束 %s"), *Ev.Chapter.ToString()); break;
+	case ELeoEventKind::RuntimeError:
+		S = FString::Printf(TEXT("[运行时错误 L%d] %s %s"), Ev.Line, *Ev.DiagCode, *Ev.DiagMsg);
+		break;
+	case ELeoEventKind::Custom:
+		S = FString::Printf(TEXT("[%s]"), *Ev.CustomName.ToString());
+		for (const TPair<FName, FString>& P : Ev.ExtraParams)
+		{
+			S += FString::Printf(TEXT(" %s=%s"), *P.Key.ToString(), *P.Value);
+		}
+		break;
+	default: break;
+	}
+	if (S.IsEmpty()) { return; }
+	if (S.Len() > 200) { S = S.Left(200) + TEXT("…"); }
+	if (Ev.Line > 0) { S = FString::Printf(TEXT("L%-4d "), Ev.Line) + S; }
+	EventLog.Add(MoveTemp(S));
+	if (EventLog.Num() > EventLogCapacity) { EventLog.RemoveAt(0, EventLog.Num() - EventLogCapacity); }
+}
+
+void ULeoNarrativeSubsystem::GetDebugSnapshot(FLeoDebugSnapshot& Out) const
+{
+	Out = FLeoDebugSnapshot();
+	Out.bAuto = bAuto;
+	Out.bSkip = bSkip;
+	Out.ReadTextCount = ReadTextIds.Num();
+	Out.bGraphActive = ActiveGraph != nullptr;
+	Out.GraphNode = CurrentGraphNodeId.ToString();
+	Out.CustomCommands = RegisteredCommandNames;
+	Out.EventLog = EventLog;
+
+	auto DumpBoard = [](const UNarrativeBlackboard* Board, TArray<FLeoDebugVar>& OutVars)
+	{
+		if (!Board) { return; }
+		TMap<FName, leo::FLeoValue> Vars;
+		Board->DumpToMap(Vars);
+		Vars.KeySort([](const FName& A, const FName& B) { return A.LexicalLess(B); });
+		for (const TPair<FName, leo::FLeoValue>& KV : Vars)
+		{
+			FLeoDebugVar V;
+			V.Key = KV.Key.ToString();
+			V.Value = LeoBridge::ToFString(KV.Value.ToString());
+			OutVars.Add(MoveTemp(V));
+		}
+	};
+	DumpBoard(GlobalBB, Out.GlobalVars);
+
+	if (const ULeoVM* VM = ActiveVM)
+	{
+		Out.bActive = true;
+		Out.StateName = ULeoVM::StateName(VM->GetState());
+		Out.Chapter = VM->GetChapter().ToString();
+		Out.PC = VM->GetPC();
+		Out.Line = VM->GetCurrentLine();
+		Out.SuspendToken = VM->GetSuspendToken();
+		Out.WaitRemaining = VM->GetWaitRemaining();
+		Out.CommandDesc = VM->DescribeCurrentCommand();
+		FName Label; int32 Offset = 0;
+		if (VM->GetAnchor(Label, Offset))
+		{
+			Out.Anchor = FString::Printf(TEXT("%s+%d"), *Label.ToString(), Offset);
+		}
+		DumpBoard(VM->GetLocalBlackboard(), Out.LocalVars);
 	}
 }

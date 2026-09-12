@@ -58,6 +58,12 @@ public:
 	UNarrativeBlackboard* GetLocalBlackboard() const { return LocalBB; }
 	UNarrativeBlackboard* GetGlobalBlackboard() const { return GlobalBB; }
 
+	// ---- 调试支持（编辑器调试器 Tab 只读消费）----
+	static const TCHAR* StateName(ELeoVMState::Type S);   // "WaitClick" 等展示名
+	int32 GetCurrentLine() const;                          // 当前命令源行号
+	float GetWaitRemaining() const { return WaitRemaining; }
+	FString DescribeCurrentCommand() const;                // 当前命令一行摘要
+
 	// 状态锚点（存档/恢复）
 	bool GetAnchor(FName& OutLabel, int32& OutOffset) const;
 	bool RestoreAnchor(FName Label, int32 Offset);

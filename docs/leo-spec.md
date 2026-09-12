@@ -231,6 +231,24 @@ investigate scene_office mode=strict     # 挂起为 investigation 断点
 jumpif investigation >= 2 -> lab_solved  # 调查完成后按发现数分流
 ```
 
+### 10.6 框架预注册命令：`seq`（Level Sequencer 过场）
+
+`seq` 由框架用 §10.1 同一机制预注册（Stage/LeoSequencerPerformer.cpp），**不是内核命令**——
+证明扩展点足以承载演出类阻塞。清单（ULeoAssetManifest）把逻辑名映射到 `ULevelSequence` 资产。
+
+```leo
+seq lab_intro_cut wait=1 rate=1.0 start=0 loop=0
+jumpif seq >= 1 -> cut_done   # seq 键 = 1 自然播完 / 0 缺资源或被跳过（永不软锁）
+```
+
+- `wait=1`（默认）：挂起为 `seq` 断点，播完 `OnFinished → ResumeWith("seq", 1)`；
+  缺资源以 0 恢复走兜底分支；游戏侧 `SkipSequences()` 停播并以 0 恢复（跳过过场）；
+- `wait=0`：即刻继续（氛围循环，跨章节存活，`loop=1` 配套）；
+- `rate`/`start`：倍速与起始秒数；带 Camera Cut 轨道的序列自动接管镜头（引擎原生）。
+- 存档语义：锚点落在 `seq` 命令上，读档重放过场（不重播的过场把 label 放在其后）。
+
+示例：Content/Scripts/chapter03.leo；无头验证：`-run=LeoRun -exec="leo.demoseq"`（合成序列）。
+
 ## 11. 完整示例
 
 ```leo

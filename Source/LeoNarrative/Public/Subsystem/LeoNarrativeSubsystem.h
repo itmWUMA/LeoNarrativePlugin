@@ -14,7 +14,37 @@ class ULeoAssetManifest;
 class ULeoAudioAdapter;
 class ULeoDialogueWidget;
 class ULeoScenarioGraph;
+class ULeoSequencerPerformer;
 class ULeoStage;
+
+// ---- 调试快照（编辑器调试器 Tab 只读消费；跨模块导出）----
+struct LEONARRATIVE_API FLeoDebugVar
+{
+	FString Key;
+	FString Value;
+};
+
+struct LEONARRATIVE_API FLeoDebugSnapshot
+{
+	bool bActive = false;          // 有活跃 VM
+	FString StateName;             // WaitClick 等
+	FString Chapter;
+	FString CommandDesc;           // 当前命令一行摘要
+	FString Anchor;                // "label+offset"
+	FName SuspendToken;
+	int32 PC = 0;
+	int32 Line = 0;
+	float WaitRemaining = 0.f;
+	bool bAuto = false;
+	bool bSkip = false;
+	int32 ReadTextCount = 0;
+	bool bGraphActive = false;
+	FString GraphNode;
+	TArray<FLeoDebugVar> LocalVars;
+	TArray<FLeoDebugVar> GlobalVars;
+	TArray<FString> EventLog;      // 最近事件（正序，上限 64）
+	TArray<FString> CustomCommands;
+};
 
 UCLASS()
 class LEONARRATIVE_API ULeoNarrativeSubsystem : public UGameInstanceSubsystem
@@ -45,6 +75,10 @@ public:
 	ULeoScriptRegistry* GetRegistry() const { return Registry; }
 	ULeoStage* GetStage() const { return Stage; }
 	ULeoAudioAdapter* GetAudio() const { return Audio; }
+	ULeoSequencerPerformer* GetSequencer() const { return Sequencer; }
+
+	// 跳过当前过场：停掉所有序列播放，若阻塞在 seq 断点则以 0 恢复（脚本走兜底分支）
+	void SkipSequences();
 
 	// 逻辑名清单（可选；未设置时表现层降级为占位/静音）
 	void SetManifest(ULeoAssetManifest* InManifest);
@@ -76,6 +110,12 @@ public:
 	// 重新扫描编译剧本（编辑器热重载）
 	bool ReloadScripts();
 
+	// ---- 调试支持 ----
+	void GetDebugSnapshot(FLeoDebugSnapshot& Out) const; // 只读快照（调试器 Tab 轮询）
+	const TArray<FString>& GetEventLog() const { return EventLog; }
+	static const TCHAR* GlobalSlotName()   { return TEXT("LeoNarrative/Global"); }
+	static const TCHAR* ProgressSlotName() { return TEXT("LeoNarrative/Progress"); }
+
 	// 表现层订阅入口（UI/Stage/Audio 全部从这里拿事件）
 	FLeoEventSignature OnLeoEvent;
 
@@ -102,6 +142,8 @@ private:
 	UPROPERTY()
 	TObjectPtr<ULeoAudioAdapter> Audio;
 	UPROPERTY()
+	TObjectPtr<ULeoSequencerPerformer> Sequencer;
+	UPROPERTY()
 	TObjectPtr<ULeoDialogueWidget> DialogueWidget;
 	UPROPERTY()
 	TObjectPtr<ULeoAssetManifest> Manifest;
@@ -117,4 +159,7 @@ private:
 	bool bSkip = false;
 	TSet<FString> ReadTextIds;
 	TArray<FString> RegisteredCommandNames; // 已注册的自定义命令名（编译前应用）
+	TArray<FString> EventLog;               // 调试器事件环形缓冲（上限 64）
+	void AppendEventLog(const FLeoEvent& Ev);
+	static constexpr int32 EventLogCapacity = 64;
 };

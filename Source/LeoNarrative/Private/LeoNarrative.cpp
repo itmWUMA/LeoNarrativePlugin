@@ -3,12 +3,15 @@
 #include "LeoNarrative.h"
 
 #include "Examples/LeoInvestigationDemo.h"
+#include "Stage/LeoSequencerPerformer.h"
 
 #define LOCTEXT_NAMESPACE "FLeoNarrativeModule"
 
 void FLeoNarrativeModule::StartupModule()
 {
-	// 扩展示例：注册 investigate 自定义命令（须早于任何剧本编译）
+	// 框架预注册演出命令：seq（Level Sequencer 过场，须早于任何剧本编译）
+	ULeoSequencerPerformer::RegisterSeqCommand();
+	// 扩展示例：注册 investigate 自定义命令
 	LeoExamples::RegisterInvestigationDemo();
 }
 
