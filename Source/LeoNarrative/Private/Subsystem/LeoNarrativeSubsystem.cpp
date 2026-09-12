@@ -74,6 +74,10 @@ bool ULeoNarrativeSubsystem::StartChapterInternal(FName Chapter, FName Label, in
 	}
 	Stop();
 
+	// 对话 UI 先于 VM 启动挂载(widget 在 Construct 时订阅事件流,晚挂会丢开场首批演出)。
+	// 无头环境(LeoRun/nullrhi)没有 PlayerController,静默跳过。
+	ShowDialogueUI(true);
+
 	// 局部黑板每章新建，父链指向全局
 	UNarrativeBlackboard* LocalBB = NewObject<UNarrativeBlackboard>(this);
 	LocalBB->Parent = GlobalBB;

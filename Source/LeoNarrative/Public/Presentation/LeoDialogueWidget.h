@@ -10,6 +10,7 @@ class UBorder;
 class UButton;
 class UHorizontalBox;
 class UImage;
+class UOverlay;
 class USizeBox;
 class UTextBlock;
 class UVerticalBox;
@@ -23,6 +24,9 @@ public:
 	virtual void NativeConstruct() override;
 	virtual void NativeDestruct() override;
 	virtual void NativeTick(const FGeometry& MyGeometry, float DeltaSeconds) override;
+	// 纯 C++ 建树必须在此返回真实根:基类在 RootWidget 为空时包一个隐形 SSpacer,
+	// NativeConstruct 建树晚于 Slate 包装,屏幕将永远空白
+	virtual TSharedRef<SWidget> RebuildWidget() override;
 
 	void HandleLeoEvent(const FLeoEvent& Ev);
 
@@ -53,8 +57,9 @@ private:
 	// UMG 树节点引用（UPROPERTY 防 GC）
 	UPROPERTY()
 	TObjectPtr<UImage> BgImage;
+	// 立绘层：多角色按 at= 各自对齐、立于画面底部
 	UPROPERTY()
-	TObjectPtr<UHorizontalBox> CharRow;
+	TObjectPtr<UOverlay> CharRow;
 	UPROPERTY()
 	TObjectPtr<UVerticalBox> ChoiceBox;
 	UPROPERTY()

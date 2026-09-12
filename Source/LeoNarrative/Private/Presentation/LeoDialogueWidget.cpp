@@ -1,5 +1,6 @@
 #include "Presentation/LeoDialogueWidget.h"
 #include "Subsystem/LeoNarrativeSubsystem.h"
+#include "Data/LeoAssetManifest.h"
 #include "Stage/LeoStage.h"
 #include "VM/LeoVM.h"
 
@@ -16,6 +17,18 @@
 #include "Components/VerticalBox.h"
 #include "Components/VerticalBoxSlot.h"
 #include "Engine/Texture2D.h"
+
+TSharedRef<SWidget> ULeoDialogueWidget::RebuildWidget()
+{
+	Super::RebuildWidget();
+	if (!bBuiltTree)
+	{
+		BuildUmgTree();
+		bBuiltTree = true;
+	}
+	check(WidgetTree->RootWidget);
+	return WidgetTree->RootWidget->TakeWidget();
+}
 
 void ULeoDialogueWidget::NativeConstruct()
 {
@@ -65,14 +78,16 @@ void ULeoDialogueWidget::BuildUmgTree()
 		return Slot;
 	};
 
-	// [0] 背景
+	// [0] 背景（初始深色底;WhiteBrush 加 tint 保证可绘制,空画刷会画白块）
 	BgImage = Tree->ConstructWidget<UImage>(UImage::StaticClass(), TEXT("Bg"));
-	BgImage->Brush.TintColor = FSlateColor(FLinearColor(0.06f, 0.07f, 0.12f, 1.f));
+	FSlateBrush InitialBg(*FCoreStyle::Get().GetBrush("WhiteBrush"));
+	InitialBg.TintColor = FSlateColor(FLinearColor(0.06f, 0.07f, 0.12f, 1.f));
+	BgImage->SetBrush(InitialBg);
 	AddOverlayChild(BgImage, VAlign_Fill, HAlign_Fill, FMargin());
 
-	// [1] 立绘占位行
-	CharRow = Tree->ConstructWidget<UHorizontalBox>(UHorizontalBox::StaticClass(), TEXT("CharRow"));
-	AddOverlayChild(CharRow, VAlign_Top, HAlign_Fill, FMargin(8));
+	// [1] 立绘层（全幅覆盖，内部各立绘按 at 对齐、立于底部）
+	CharRow = Tree->ConstructWidget<UOverlay>(UOverlay::StaticClass(), TEXT("CharRow"));
+	AddOverlayChild(CharRow, VAlign_Fill, HAlign_Fill, FMargin());
 
 	// [2] 选项列表（居中，定宽）
 	ChoiceBoxSizer = Tree->ConstructWidget<USizeBox>(USizeBox::StaticClass(), TEXT("ChoiceSizer"));
@@ -110,9 +125,16 @@ void ULeoDialogueWidget::BuildUmgTree()
 	FooterBlock->SetColorAndOpacity(FSlateColor(FLinearColor(0.7f, 0.7f, 0.7f, 0.8f)));
 	AddOverlayChild(FooterBlock, VAlign_Bottom, HAlign_Right, FMargin(8));
 
-	// [5] 全屏推进按钮（透明样式；选项出现时转为不拦命中）
+	// [5] 全屏推进按钮（NoDrawing 画刷组;空 FSlateBrush 会以白色兜底绘制成全屏白块）
 	ClickButton = Tree->ConstructWidget<UButton>(UButton::StaticClass(), TEXT("ClickCatcher"));
-	ClickButton->SetStyle(FButtonStyle()); // 空样式 = 不可见但可点
+	FButtonStyle BtnStyle;
+	FSlateBrush NoDrawBrush;
+	NoDrawBrush.DrawAs = ESlateBrushDrawType::NoDrawType;
+	BtnStyle.Normal = NoDrawBrush;
+	BtnStyle.Hovered = NoDrawBrush;
+	BtnStyle.Pressed = NoDrawBrush;
+	BtnStyle.Disabled = NoDrawBrush;
+	ClickButton->SetStyle(BtnStyle);
 	ClickButton->OnClicked.AddDynamic(this, &ULeoDialogueWidget::OnAdvanceClicked);
 	AddOverlayChild(ClickButton, VAlign_Fill, HAlign_Fill, FMargin());
 
@@ -137,20 +159,22 @@ void ULeoDialogueWidget::HandleLeoEvent(const FLeoEvent& Ev)
 
 	case ELeoEventKind::Bg:
 	{
-		FSlateBrush Brush;
-		Brush.TintColor = FSlateColor(FLinearColor::White);
+		// 清单路径需要 TryLoad 触发加载(ResolveObject 只查内存);失败一律回落深色底
+		UTexture2D* Tex = nullptr;
 		if (ULeoStage* Stage = Sub->GetStage())
 		{
-			if (UTexture2D* Tex = Cast<UTexture2D>(Stage->GetCurrentBgPath().ResolveObject()))
-			{
-				Brush.SetResourceObject(Tex);
-			}
-			else if (!Stage->GetCurrentBgPath().IsValid())
-			{
-				Brush.TintColor = FSlateColor(FLinearColor(0.06f, 0.07f, 0.12f, 1.f)); // 无资产：回落深色底
-			}
+			Tex = Cast<UTexture2D>(Stage->GetCurrentBgPath().TryLoad());
 		}
-		BgImage->SetBrush(Brush);
+		if (Tex)
+		{
+			BgImage->SetBrushFromTexture(Tex);
+		}
+		else
+		{
+			FSlateBrush DarkBrush(*FCoreStyle::Get().GetBrush("WhiteBrush"));
+			DarkBrush.TintColor = FSlateColor(FLinearColor(0.06f, 0.07f, 0.12f, 1.f));
+			BgImage->SetBrush(DarkBrush);
+		}
 		break;
 	}
 
@@ -239,20 +263,53 @@ void ULeoDialogueWidget::RebuildCharRow()
 	ULeoNarrativeSubsystem* Sub = GI ? GI->GetSubsystem<ULeoNarrativeSubsystem>() : nullptr;
 	if (!Sub || !Sub->GetStage()) { return; }
 	UWidgetTree* Tree = WidgetTree;
+	ULeoAssetManifest* Manifest = Sub->GetManifest();
 
 	for (const TPair<FString, FLeoCharState>& KV : Sub->GetStage()->GetChars())
 	{
 		const FLeoCharState& S = KV.Value;
-		UBorder* SlotBox = Tree->ConstructWidget<UBorder>(UBorder::StaticClass());
-		SlotBox->SetBrushColor(FLinearColor(0.2f, 0.24f, 0.34f, 0.9f));
-		SlotBox->SetPadding(FMargin(16, 34));
-		UTextBlock* Label = Tree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass());
-		Label->SetText(FText::FromString(FString::Printf(TEXT("%s\n%s [%s]"), *KV.Key, *S.AssetId.ToString(), *S.At)));
-		Label->SetFont(FCoreStyle::GetDefaultFontStyle(TEXT("Roboto"), 14));
-		SlotBox->SetContent(Label);
-		UHorizontalBoxSlot* BoxSlot = CharRow->AddChildToHorizontalBox(SlotBox);
-		BoxSlot->SetSize(ESlateSizeRule::Automatic);
-		BoxSlot->SetPadding(FMargin(6));
+
+		// 每个槽位一个包络:立绘图原尺寸,按 at 横向对齐、立于画面底部
+		UOverlay* Cell = Tree->ConstructWidget<UOverlay>(UOverlay::StaticClass());
+		UImage* Portrait = Tree->ConstructWidget<UImage>(UImage::StaticClass());
+
+		bool bLoaded = false;
+		if (Manifest)
+		{
+			FSoftObjectPath Path;
+			if (Manifest->TryResolve(S.AssetId, Path))
+			{
+				if (UTexture2D* Tex = Cast<UTexture2D>(Path.TryLoad()))
+				{
+					Portrait->SetBrushFromTexture(Tex);
+					bLoaded = true;
+				}
+			}
+		}
+		if (!bLoaded)
+		{
+			// 无清单/缺资产回落:WhiteBrush 加 tint 画色块 + 槽位文字占位
+			FSlateBrush FallbackBrush(*FCoreStyle::Get().GetBrush("WhiteBrush"));
+			FallbackBrush.TintColor = FSlateColor(FLinearColor(0.2f, 0.24f, 0.34f, 0.9f));
+			FallbackBrush.ImageSize = FVector2D(220, 130);
+			Portrait->SetBrush(FallbackBrush);
+			UTextBlock* Label = Tree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass());
+			Label->SetText(FText::FromString(FString::Printf(TEXT("%s\n%s [%s]"), *KV.Key, *S.AssetId.ToString(), *S.At)));
+			Label->SetColorAndOpacity(FSlateColor(FLinearColor::White));
+			UOverlaySlot* LabelSlot = Cell->AddChildToOverlay(Label);
+			LabelSlot->SetHorizontalAlignment(HAlign_Center);
+			LabelSlot->SetVerticalAlignment(VAlign_Center);
+		}
+
+		UOverlaySlot* Inner = Cell->AddChildToOverlay(Portrait);
+		Inner->SetHorizontalAlignment(HAlign_Center);
+		Inner->SetVerticalAlignment(VAlign_Bottom);
+
+		UOverlaySlot* CharSlot = CharRow->AddChildToOverlay(Cell);
+		CharSlot->SetVerticalAlignment(VAlign_Bottom);
+		CharSlot->SetHorizontalAlignment(
+			S.At == TEXT("left") ? HAlign_Left :
+			S.At == TEXT("right") ? HAlign_Right : HAlign_Center);
 	}
 }
 
