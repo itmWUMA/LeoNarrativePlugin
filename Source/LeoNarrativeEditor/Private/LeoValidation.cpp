@@ -3,6 +3,7 @@
 #include "Data/LeoAssetManifest.h"
 #include "Data/LeoScenarioGraph.h"
 #include "LeoConditionCodec.h"
+#include "LeoL10nToolkit.h"
 #include "ScriptRuntime/LeoScriptBridge.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
@@ -396,6 +397,87 @@ namespace
 			CheckGraph(KV.Value, KV.Key, ChapterLabels, WrittenVars, Out, OutErrors);
 		}
 	}
+	// ---- 本地化 CSV 核对 ----
+	// 错误（红）：解析失败 / 缺列 / ID 重复 / 标了 OK 却没译文。
+	// 警告（不计数）：GONE（脚本已删）、STALE（原文已变）、未翻译统计——是翻译工作流的状态而非坏数据
+	void CheckL10nCsvs(const TMap<FString, FString>& ScriptTextSources, FLeoValidateSummary& Summary)
+	{
+		TArray<FString> Cultures;
+		LeoL10nToolkit::DiscoverCultures(Cultures);
+		Summary.L10nCultures = Cultures.Num();
+		if (Cultures.Num() == 0) { return; }
+
+		for (const FString& Culture : Cultures)
+		{
+			const FString Dir = FPaths::ProjectContentDir() / TEXT("L10n") / Culture;
+			TArray<FString> Files;
+			IFileManager::Get().FindFiles(Files, *(Dir / TEXT("*.csv")), true, false);
+			Files.Sort();
+			for (const FString& File : Files)
+			{
+				const FString Path = Dir / File;
+				TArray<LeoL10nToolkit::FCsvRow> Rows;
+				FString Err;
+				if (!LeoL10nToolkit::ReadCsvRows(Path, Rows, Err))
+				{
+					Summary.L10nItems.Add(MakeItem(Path, 0, TEXT("CSV_PARSE_FAIL"), Err, true));
+					++Summary.L10nErrors;
+					continue;
+				}
+				TSet<FString> Seen;
+				int32 Untranslated = 0, Stale = 0, Gone = 0;
+				for (const LeoL10nToolkit::FCsvRow& R : Rows)
+				{
+					if (Seen.Contains(R.Id))
+					{
+						Summary.L10nItems.Add(MakeItem(Path, 0, TEXT("CSV_DUP_ID"),
+							FString::Printf(TEXT("ID 重复: %s"), *R.Id), true));
+						++Summary.L10nErrors;
+						continue;
+					}
+					Seen.Add(R.Id);
+					if (R.Status == TEXT("OK") && R.Translation.IsEmpty())
+					{
+						Summary.L10nItems.Add(MakeItem(Path, 0, TEXT("CSV_OK_NO_TRANSLATION"),
+							FString::Printf(TEXT("标了 OK 但没有译文: %s"), *R.Id), true));
+						++Summary.L10nErrors;
+					}
+					const FString* ScriptSource = ScriptTextSources.Find(R.Id);
+					if (!ScriptSource)
+					{
+						++Gone;
+						Summary.L10nItems.Add(MakeItem(Path, 0, TEXT("CSV_GONE"),
+							FString::Printf(TEXT("脚本已无此条目（改稿/删行遗留，确认后删除该行）: %s"), *R.Id), false));
+					}
+					else if (*ScriptSource != R.Source)
+					{
+						++Stale;
+						Summary.L10nItems.Add(MakeItem(Path, 0, TEXT("CSV_STALE"),
+							FString::Printf(TEXT("原文已变需重译（Status 会转 STALE，译文保留）: %s"), *R.Id), false));
+					}
+					if (R.Translation.IsEmpty()) { ++Untranslated; }
+				}
+				// 与脚本条目比对：缺多少行（未提取 / 新增台词）
+				int32 Missing = 0;
+				for (const TPair<FString, FString>& KV : ScriptTextSources)
+				{
+					const FString Chapter = FPaths::GetBaseFilename(File);
+					if (KV.Key.StartsWith(Chapter + TEXT("/")) && !Seen.Contains(KV.Key)) { ++Missing; }
+				}
+				if (Untranslated > 0 || Missing > 0)
+				{
+					Summary.L10nItems.Add(MakeItem(Path, 0, TEXT("L10N_UNTRANSLATED"),
+						FString::Printf(TEXT("%s：未翻译 %d 条 / 缺行 %d 条（工作流状态，跑 extract 可同步）"),
+							*Culture, Untranslated, Missing), false));
+				}
+				if (Stale > 0 || Gone > 0)
+				{
+					Summary.L10nItems.Add(MakeItem(Path, 0, TEXT("L10N_SYNC_HINT"),
+						FString::Printf(TEXT("%s：STALE %d 条 / GONE %d 条（跑 extract 更新状态）"), *Culture, Stale, Gone), false));
+				}
+			}
+		}
+	}
 } // namespace
 
 FLeoValidateSummary ValidateAllStructured(const FString& ManifestAssetPath)
@@ -417,10 +499,11 @@ FLeoValidateSummary ValidateAllStructured(const FString& ManifestAssetPath)
 		}
 	};
 
-	// 宿主工程剧本（同时提取资源引用 + 章节 label 表 + 变量写入集合）
+	// 宿主工程剧本（同时提取资源引用 + 章节 label 表 + 变量写入集合 + 本地化条目表）
 		TMap<FName, FLeoAssetUsage> Usages;
 		TMap<FName, TSet<FName>> ChapterLabels;
 		TSet<FName> ScriptWrittenVars;
+		TMap<FString, FString> ScriptTextSources; // TextId → 当前原文（本地化 CSV 交叉核对用）
 		const FString ScriptsDir = FPaths::ProjectContentDir() / TEXT("Scripts");
 	if (FPaths::DirectoryExists(ScriptsDir))
 	{
@@ -449,6 +532,17 @@ FLeoValidateSummary ValidateAllStructured(const FString& ManifestAssetPath)
 				for (const LeoBridge::FLeoVarUsageInfo& V : VarUsages)
 				{
 					if (V.bWritten) { ScriptWrittenVars.Add(FName(*V.Name)); }
+				}
+				TArray<LeoL10nToolkit::FTextEntry> Entries;
+				if (LeoL10nToolkit::CollectEntries(Program, FPaths::GetBaseFilename(Path), Entries) > 0)
+				{
+					// 撞号 = 译文会错位；仍填充映射（避免整章误报 GONE），但提示先 freeze
+					Summary.L10nItems.Add(MakeItem(Path, 0, TEXT("L10N_ID_COLLISION"),
+						FString::Printf(TEXT("%s 存在文本 ID 撞号（freeze 后插行未再 freeze？译文会错位）"), *FPaths::GetBaseFilename(Path)), false));
+				}
+				for (const LeoL10nToolkit::FTextEntry& E : Entries)
+				{
+					ScriptTextSources.Add(E.Id, E.Source);
 				}
 			}
 			if (!R.bPass) { ++Summary.Failures; }
@@ -504,6 +598,9 @@ FLeoValidateSummary ValidateAllStructured(const FString& ManifestAssetPath)
 
 	// ---- 编排图核对（无图资产时跳过）----
 	CheckAllGraphAssets(ChapterLabels, ScriptWrittenVars, Summary.GraphItems, Summary.GraphErrors);
+
+	// ---- 本地化 CSV 核对（无 Content/L10n 时跳过）----
+	CheckL10nCsvs(ScriptTextSources, Summary);
 
 	return Summary;
 }
@@ -623,6 +720,7 @@ int32 ValidateAll(const FString& ManifestAssetPath)
 	}
 	for (const FLeoCheckItem& It : S.AssetItems) { LogItem(It); }
 	for (const FLeoCheckItem& It : S.GraphItems) { LogItem(It); }
+	for (const FLeoCheckItem& It : S.L10nItems) { LogItem(It); }
 
 	int32 Total = S.Files.Num();
 	if (!S.ManifestPath.IsEmpty())
@@ -634,9 +732,10 @@ int32 ValidateAll(const FString& ManifestAssetPath)
 		UE_LOG(LogLeoValidate, Display, TEXT("清单核对: 未找到 ULeoAssetManifest，跳过（工程无清单时为正常）"));
 	}
 	UE_LOG(LogLeoValidate, Display, TEXT("编排图核对: %d 项错误"), S.GraphErrors);
-	UE_LOG(LogLeoValidate, Display, TEXT("LeoValidate 完成: %d 个文件, %d 个不符 + %d 项资产错误 + %d 项图错误"),
-		Total, S.Failures, S.AssetErrors, S.GraphErrors);
-	return S.Failures + S.AssetErrors + S.GraphErrors;
+	UE_LOG(LogLeoValidate, Display, TEXT("本地化核对: %d 种语言（%d 项错误）"), S.L10nCultures, S.L10nErrors);
+	UE_LOG(LogLeoValidate, Display, TEXT("LeoValidate 完成: %d 个文件, %d 个不符 + %d 项资产错误 + %d 项图错误 + %d 项本地化错误"),
+		Total, S.Failures, S.AssetErrors, S.GraphErrors, S.L10nErrors);
+	return S.Failures + S.AssetErrors + S.GraphErrors + S.L10nErrors;
 }
 
 } // namespace LeoValidation

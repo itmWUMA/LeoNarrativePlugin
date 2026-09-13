@@ -6,6 +6,7 @@
 #include "Containers/Ticker.h"
 #include "Blackboard/NarrativeBlackboard.h"
 #include "Data/LeoGraphEval.h"
+#include "L10n/LeoLocalization.h"
 #include "ScriptRuntime/LeoScriptRegistry.h"
 #include "VM/LeoEvents.h"
 #include "VM/LeoVM.h"
@@ -128,6 +129,11 @@ public:
 	// 重新扫描编译剧本（编辑器热重载）
 	bool ReloadScripts();
 
+	// ---- 剧本台词本地化（CSV 译文表：查不到回落原文）----
+	FLeoL10nTable& GetL10n() { return L10n; }
+	bool SetLanguage(const FString& Culture);   // 切语言并重载译文表（影响后续广播的显示文本）
+	FString GetCurrentLanguage() const;
+
 	// ---- 调试支持 ----
 	void GetDebugSnapshot(FLeoDebugSnapshot& Out) const; // 只读快照（调试器 Tab 轮询）
 	const TArray<FString>& GetEventLog() const { return EventLog; }
@@ -175,6 +181,7 @@ private:
 	FTSTicker::FDelegateHandle TickerHandle;
 	bool bAuto = false;
 	bool bSkip = false;
+	FLeoL10nTable L10n;                       // 剧本台词译文表（TextId → 译文，空=回落原文）
 	TSet<FString> ReadTextIds;
 	TArray<FString> RegisteredCommandNames; // 已注册的自定义命令名（编译前应用）
 	TArray<FString> EventLog;               // 调试器事件环形缓冲（上限 64）

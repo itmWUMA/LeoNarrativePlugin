@@ -22,6 +22,7 @@ enum class ELeoEventKind : uint8_t
 struct FLeoEventOption
 {
 	FString Text;
+	FString TextId;       // 本地化/已读锚点（显式 id= 或自动 章节/label/c序号/选项号）
 	FString TargetLabel;
 };
 

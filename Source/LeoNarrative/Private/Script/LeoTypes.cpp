@@ -62,6 +62,8 @@ const char* LeoDiagName(ELeoDiag Code)
 	case ELeoDiag::E_NESTED_CHOICE:return "E_NESTED_CHOICE";
 	case ELeoDiag::E_MISSING_END:  return "E_MISSING_END";
 	case ELeoDiag::E_IO:           return "E_IO";
+	case ELeoDiag::E_BAD_TEXT_ID:  return "E_BAD_TEXT_ID";
+	case ELeoDiag::E_DUP_TEXT_ID:  return "E_DUP_TEXT_ID";
 	case ELeoDiag::E_UNDEF_VAR:    return "E_UNDEF_VAR";
 	case ELeoDiag::E_TYPE:         return "E_TYPE";
 	case ELeoDiag::E_DIV_ZERO:     return "E_DIV_ZERO";

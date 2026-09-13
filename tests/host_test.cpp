@@ -138,6 +138,49 @@ int main()
 		Check(Reads.size() == 3, "分析: 表达式收集 3 个变量名");
 	}
 
+	// ---- 本地化显式文本 ID（spec §8）----
+	{
+		const FLeoProgram P = CompileChapter("text 李雷 | 你好。 id=d/a/0\nend\n", "lid1");
+		Check(P.Ok && P.Commands.size() == 2
+			&& P.Commands[0].TextId == "d/a/0" && P.Commands[0].Body == "你好。"
+			&& P.Commands[0].Speaker == "李雷",
+			"l10n: text 尾缀 id= 剥离进 TextId（body/speaker 不含尾缀）");
+	}
+	{
+		const FLeoProgram P = CompileChapter("text - | 我的 ID 是 id=admin\nend\n", "lid2");
+		Check(P.Ok && P.Commands[0].TextId.empty() && P.Commands[0].Body == "我的 ID 是 id=admin",
+			"l10n: 无斜杠的 id=xxx 视为正文（不剥离不报错）");
+	}
+	{
+		const FLeoProgram P = CompileChapter("text - | 你好。 id=x/a!b\nend\n", "lid3");
+		Check(!P.Ok && HasDiag(P, ELeoDiag::E_BAD_TEXT_ID), "l10n: 斜杠+非法字符报 E_BAD_TEXT_ID");
+	}
+	{
+		const FLeoProgram P = CompileChapter("text - | 一 id=x/a\ntext - | 二 id=x/a\nend\n", "lid4");
+		Check(!P.Ok && HasDiag(P, ELeoDiag::E_DUP_TEXT_ID), "l10n: 显式 ID 重复报 E_DUP_TEXT_ID");
+	}
+	{
+		const FLeoProgram P = CompileChapter(
+			"choice\n    甲 -> lab_a id=d/c/0/0\n    乙 -> lab_b if v >= 1 id=d/c/0/1\nlabel lab_a\ntext - | x\nend\nlabel lab_b\ntext - | y\nend\n", "lid5");
+		Check(P.Ok
+			&& P.Commands[0].Kind == ELeoCmd::Choice
+			&& P.Commands[0].Options[0].TextId == "d/c/0/0"
+			&& P.Commands[0].Options[1].TextId == "d/c/0/1"
+			&& P.Commands[0].Options[1].ExprIndex >= 0,
+			"l10n: 选项行 id= 尾缀与 if 条件共存");
+	}
+	{
+		const FLeoProgram P = CompileChapter(
+			"choice\n    甲 -> lab_a id=x/o\nlabel lab_a\ntext - | 撞 id=x/o\nend\n", "lid6");
+		Check(!P.Ok && HasDiag(P, ELeoDiag::E_DUP_TEXT_ID), "l10n: 选项与 text 显式 ID 相互撞号报 E_DUP_TEXT_ID");
+	}
+	{
+		// 正文经 LTrim 后以 id= 开头（无前置空格）不构成尾缀，整段视为正文
+		const FLeoProgram P = CompileChapter("text - | id=only/x\nend\n", "lid7");
+		Check(P.Ok && P.Commands[0].TextId.empty() && P.Commands[0].Body == "id=only/x",
+			"l10n: 行首 id=（无前置空格）视为正文");
+	}
+
 	// ---- golden 语料 + 工程剧本（须在插件根目录运行）----
 	CheckDir(fs::path("tests/golden/pass"), true);
 	CheckDir(fs::path("tests/golden/fail"), false);

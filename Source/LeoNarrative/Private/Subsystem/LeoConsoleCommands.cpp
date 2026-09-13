@@ -310,3 +310,91 @@ end
 			}));
 		});
 	}));
+
+// ---- 本地化（CSV 译文表）----
+
+// leo.lang：无参 = 显示当前语言/译文表/可用语言；带参 = 切语言并重载译文表
+static FAutoConsoleCommand GLeoLang(
+	TEXT("leo.lang"), TEXT("叙事语言: leo.lang | leo.lang <culture>"),
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
+	{
+		RunWhenSubsystemReady([Args](ULeoNarrativeSubsystem* S)
+		{
+			if (Args.Num() == 0)
+			{
+				TArray<FString> Cultures;
+				FLeoL10nTable::ListAvailableCultures(Cultures);
+				UE_LOG(LogTemp, Display, TEXT("[语言] 当前=%s 译文=%d 条（目录 %s）可用: %s"),
+					*S->GetCurrentLanguage(), S->GetL10n().NumEntries(),
+					S->GetL10n().GetLoadedCultureDir().IsEmpty() ? TEXT("(无)") : *S->GetL10n().GetLoadedCultureDir(),
+					*FString::Join(Cultures, TEXT(", ")));
+				return;
+			}
+			S->SetLanguage(Args[0]);
+		});
+	}));
+
+// leo.demolang：内存注入演示章节 + 假想英文译文，验证「命中替换 / 缺译回落」两条路径
+static FAutoConsoleCommand GLeoDemoLang(
+	TEXT("leo.demolang"), TEXT("本地化演示: 注入章节+英文译文自动播完并断言"),
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>&)
+	{
+		RunWhenSubsystemReady([](ULeoNarrativeSubsystem* S)
+		{
+			S->GetRegistry()->CompileMemory(TEXT("demo_l10n_ch"), TEXT(R"LEO(
+text - | 自动 ID 的句子，等译文。
+text 李雷 | 显式 ID 的句子，等译文。 id=demo/l10n/hello
+choice
+    选项甲 -> lab_a id=demo/l10n/opt
+    选项乙 -> lab_b
+label lab_a
+text - | 分支甲，未提供译文。
+end
+label lab_b
+text - | 分支乙。
+end
+)LEO"));
+			// 注入译文：自动 ID / 显式 ID / 选项各一条；分支甲故意不译（回落原文）
+			FLeoL10nTable& T = S->GetL10n();
+			T.AddEntry(TEXT("demo_l10n_ch/_root/0"), TEXT("Auto-ID line, localized."));
+			T.AddEntry(TEXT("demo/l10n/hello"), TEXT("Explicit-ID line, localized."));
+			T.AddEntry(TEXT("demo/l10n/opt"), TEXT("Option A (EN)"));
+
+			static FTSTicker::FDelegateHandle DemoLangHandle;
+			FTSTicker::GetCoreTicker().RemoveTicker(DemoLangHandle);
+			DemoLangHandle = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([S](float)
+			{
+				ULeoVM* VM = S->GetActiveVM();
+				if (!VM) { return false; }
+				switch (VM->GetState())
+				{
+				case ELeoVMState::WaitClick: S->Advance(); break;
+				case ELeoVMState::WaitChoice: S->Choose(0); break; // 选 0 → lab_a（未译分支）
+				case ELeoVMState::Finished: break;
+				default: break;
+				}
+				if (VM->GetState() != ELeoVMState::Finished) { return true; }
+
+				// 完结断言：事件流里必须有三条英文与一条中文回落
+				int32 Ok = 0;
+				const FString Joined = FString::Join(S->GetEventLog(), TEXT("\n"));
+				Ok += Joined.Contains(TEXT("Auto-ID line, localized.")) ? 1 : 0;
+				Ok += Joined.Contains(TEXT("Explicit-ID line, localized.")) ? 1 : 0;
+				Ok += Joined.Contains(TEXT("Option A (EN)")) ? 1 : 0;
+				Ok += Joined.Contains(TEXT("分支甲，未提供译文。")) ? 1 : 0;
+				if (Ok == 4)
+				{
+					UE_LOG(LogTemp, Display, TEXT("[demolang] PASS（命中替换×3 + 缺译回落×1）"));
+				}
+				else
+				{
+					UE_LOG(LogTemp, Error, TEXT("[demolang] FAIL（断言 %d/4，检查事件流）"), Ok);
+				}
+				return false;
+			}));
+			if (!S->StartChapter(TEXT("demo_l10n_ch")))
+			{
+				UE_LOG(LogTemp, Error, TEXT("[demolang] 章节启动失败"));
+			}
+		});
+	}));

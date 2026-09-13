@@ -82,6 +82,9 @@ text 直接就是旁白也可以。
 - speaker 为 `-` 表示旁白，内部规范化为空字符串。
 - body 为**行内原文**（rest-of-line），不做 token 切分，可含任意字符（Tab 除外，见 §2）。
 - body 去除尾随空白后不得为空，否则 `E_ARG_BAD`。
+- 行尾可带显式文本 ID 尾缀 ` id=<标识>`（` | ` 切分后对 body 的**行尾**扫描）：
+  标识 = `[A-Za-z0-9_/.-]+` 且**必须含 `/`**——无斜杠的 `id=xxx` 一律视为正文（对话里出现 "你的 id=admin" 不受影响）；
+  含斜杠但字符非法 → `E_BAD_TEXT_ID`；章内重复（含与选项撞号）→ `E_DUP_TEXT_ID`。见 §8。
 
 ### 5.2 `choice` 专项规则
 
@@ -96,6 +99,7 @@ choice
   （显示文本自身含 ` -> ` 的歧义由此消解）。
 - 目标 label 必须存在（`E_UNDEF_LABEL`）。`if` 条件为假时该选项不展示。
 - 选项数 1..8；空 choice 块 → `E_EMPTY_CHOICE`；choice 嵌套 choice → `E_NESTED_CHOICE`。
+- 选项行行尾同样可带 ` id=<标识>` 尾缀（规则同 §5.1，写在 `if <条件>` 之后亦合法——按行尾扫描剥离）。
 - 玩家选择后，**框架把结果写入黑板** `last_choice`（局部作用域，Int，0 起），再由脚本 `jumpif` 分流；
   VM 不直接改写执行指针——这是架构铁律。
 
@@ -153,9 +157,14 @@ Primary = '(' Expr ')' | Int | Float | String | 'true' | 'false' | Identifier ;
 
 ## 8. 文本稳定 ID（本地化 / 已读跟踪）
 
-自动生成：`<章节名>/<最近label>/<label内第几条text>`，如 `chapter01/lab_start/2`。
-`end` 前 v0.1 不提供显式覆盖语法（预留：`text ... | ... id=xxx`，等本地化管道落地时启用）。
-已读 ID 集合存全局档。
+自动生成：`<章节名>/<最近label>/<label内第几条text>`，如 `chapter01/lab_start/2`；
+choice 选项为 `<章节名>/<label>/c<label内第几个choice>/<静态选项下标>`（条件过滤不改变下标）。
+
+显式覆盖（v0.12 启用）：text 行与选项行行尾 ` id=<含/的标识>`，见 §5.1/§5.2。
+**送翻前用 LeoL10n `-action=freeze` 把全部自动 ID 固化为显式 ID**——之后插行删行不影响已翻译条目。
+
+本地化：译文以 CSV 存 `Content/L10n/<culture>/<章节>.csv`（列：ID,Speaker,Source,Translation,Status），
+运行时查表命中则替换显示文本、未命中回落原文；已读集合与译文无关（跨语言共享）。已读 ID 集合存全局档。
 
 ## 9. 错误码全表
 
@@ -182,6 +191,8 @@ Primary = '(' Expr ')' | Int | Float | String | 'true' | 'false' | Identifier ;
 | `E_EMPTY_CHOICE` | choice 无选项 |
 | `E_NESTED_CHOICE` | choice 嵌套 |
 | `E_MISSING_END` | 缺少 `end`（全文件至少一个） |
+| `E_BAD_TEXT_ID` | 显式文本 ID 字符非法（须 `[A-Za-z0-9_/.-]+` 且含 `/`） |
+| `E_DUP_TEXT_ID` | 显式文本 ID 章内重复（text 与选项相互撞号同样算） |
 | `E_IO` | 注册表读文件失败 |
 
 **运行时**
@@ -293,4 +304,6 @@ end
 - v0.1（2026-09）：首个实现版本。收窄项：无 `text` 显式 ID 覆盖、无条件表达式语法糖、无本地化管道。
 - v0.11（2026-09-12，M6 通用化修订）：`end` 允许多个（多分支章节各自提前收束，删除 `E_AFTER_END`）；
   新增自定义命令严格 spec 校验与玩法断点（Suspend/ResumeWith，§10）。
+- v0.12（2026-09-13，本地化管道落地）：启用显式文本 ID 尾缀 ` id=`（§5.1/§5.2/§8，含斜杠约定与
+  `E_BAD_TEXT_ID`/`E_DUP_TEXT_ID`）；选项获得自动 ID（`c序号/静态下标`）；译文 CSV 工作流（extract/freeze）。
 - 规范改动流程：修改本文件 → 同步编译器 → 更新 golden 语料 → 跑 `LeoValidate` 回归。

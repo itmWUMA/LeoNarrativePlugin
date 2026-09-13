@@ -1,4 +1,5 @@
-// Content/Scripts 热校验：.leo 保存后 0.5s 防抖重编译，日志+通知反馈
+// Content 热校验：.leo 保存后 0.5s 防抖重编译（日志+通知反馈）；
+// Content/L10n 下 CSV 保存同样防抖 → 广播刷新（校验中心的本地化核对即时更新）
 #pragma once
 
 #include "CoreMinimal.h"
@@ -10,10 +11,15 @@ public:
 	void Stop();
 
 private:
-	void OnDirectoryChanged(const TArray<struct FFileChangeData>& Changes);
+	void OnScriptsDirChanged(const TArray<struct FFileChangeData>& Changes);
+	void OnL10nDirChanged(const TArray<struct FFileChangeData>& Changes);
 	void RecompilePending();
+	void FlushL10nPending();
 
-	FDelegateHandle WatchHandle;
-	TArray<FString> PendingFiles;
+	FDelegateHandle ScriptWatchHandle;
+	FDelegateHandle L10nWatchHandle;
+	TArray<FString> PendingFiles;   // 待重编译的 .leo
+	bool bL10nPending = false;      // CSV 有变更待刷新
 	FTSTicker::FDelegateHandle DebounceHandle;
+	FTSTicker::FDelegateHandle L10nDebounceHandle;
 };

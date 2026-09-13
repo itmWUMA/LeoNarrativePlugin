@@ -427,6 +427,34 @@ namespace
 		return nullptr;
 	}
 
+	// ---- 显式文本 ID（spec §8）：行尾 " id=<标识>" ----
+	// 合法标识 = [A-Za-z0-9_/.-]+ 且至少含一个 '/'（斜杠约定把 id= 尾缀与正文里
+	// 形如 "id=admin" 的普通文字区分开——无斜杠一律视为正文，不报错）。
+	bool IsTextIdChar(char C)
+	{
+		return (C >= 'A' && C <= 'Z') || (C >= 'a' && C <= 'z') || (C >= '0' && C <= '9') ||
+			C == '_' || C == '.' || C == '-' || C == '/';
+	}
+
+	enum class ETextIdScan { None, Ok, Bad };
+
+	// 从 InOut 尾部剥离 " id=xxx"：Ok 时 OutId 填值并从串中移除；
+	// None = 尾缀不存在或值无斜杠（视为正文）；Bad = 值含斜杠但字符非法（拼错）。
+	ETextIdScan StripTrailingTextId(std::string& InOut, std::string& OutId)
+	{
+		const size_t Key = InOut.rfind(" id=");
+		if (Key == std::string::npos) { return ETextIdScan::None; }
+		const std::string Val = InOut.substr(Key + 4);
+		if (Val.empty() || Val.find('/') == std::string::npos) { return ETextIdScan::None; }
+		for (char C : Val)
+		{
+			if (!IsTextIdChar(C)) { return ETextIdScan::Bad; }
+		}
+		OutId = Val;
+		InOut.resize(Key);
+		return ETextIdScan::Ok;
+	}
+
 	// 校验数值参数并写回（范围检查失败 → E_PARAM_VALUE）
 	bool CheckNumParam(FCompileCtx& C, const std::vector<FLeoParam>& Ps, const std::string& Key,
 	                   double Min, double Max, int Line)
@@ -667,6 +695,17 @@ FLeoProgram CompileChapter(const std::string& SourceUtf8, const std::string& Sou
 				C.AddDiag(ELeoDiag::E_ARG_BAD, LineNo, "选项显示文本为空");
 				continue;
 			}
+			std::string OptExplicitId;
+			{
+				const ETextIdScan IdScan = StripTrailingTextId(Tail, OptExplicitId);
+				if (IdScan == ETextIdScan::Bad)
+				{
+					C.AddDiag(ELeoDiag::E_BAD_TEXT_ID, LineNo,
+						"选项显式文本 ID 字符非法（仅 [A-Za-z0-9_/.-] 且须含 '/'): id=" + OptExplicitId);
+					continue;
+				}
+				Tail = RTrim(Tail);
+			}
 			std::vector<FTok> T;
 			FLeoDiag D;
 			if (!LexLine(Tail, T, D))
@@ -682,6 +721,7 @@ FLeoProgram CompileChapter(const std::string& SourceUtf8, const std::string& Sou
 			}
 			FLeoOption Opt;
 			Opt.Text = std::move(OptText);
+			Opt.TextId = std::move(OptExplicitId);
 			Opt.TargetLabel = T[0].Text;
 			if (!IsIdent(Opt.TargetLabel))
 			{
@@ -738,6 +778,14 @@ FLeoProgram CompileChapter(const std::string& SourceUtf8, const std::string& Sou
 			}
 			if (Speaker == "-") { Speaker.clear(); }
 			Body = RTrim(Body);
+			std::string ExplicitId;
+			const ETextIdScan IdScan = StripTrailingTextId(Body, ExplicitId);
+			if (IdScan == ETextIdScan::Bad)
+			{
+				C.AddDiag(ELeoDiag::E_BAD_TEXT_ID, LineNo, "显式文本 ID 字符非法（仅 [A-Za-z0-9_/.-] 且须含 '/'): id=" + ExplicitId);
+				continue;
+			}
+			Body = RTrim(Body);
 			if (Body.empty())
 			{
 				C.AddDiag(ELeoDiag::E_ARG_BAD, LineNo, "text 正文为空");
@@ -746,6 +794,7 @@ FLeoProgram CompileChapter(const std::string& SourceUtf8, const std::string& Sou
 			Cmd.Kind = ELeoCmd::Text;
 			Cmd.Speaker = std::move(Speaker);
 			Cmd.Body = std::move(Body);
+			Cmd.TextId = std::move(ExplicitId);
 			C.Prog.Commands.push_back(std::move(Cmd));
 			continue;
 		}
@@ -1083,8 +1132,19 @@ FLeoProgram CompileChapter(const std::string& SourceUtf8, const std::string& Sou
 
 	// ---------- 后置校验：跳转目标回填 + 警告 ----------
 	std::set<std::string> ReferencedLabels;
+	std::map<std::string, int> SeenTextIds; // 显式文本 ID 章内唯一（本地化键撞车 = 译文错位）
 	for (FLeoCommand& Cmd : C.Prog.Commands)
 	{
+		if (!Cmd.TextId.empty() && Cmd.Kind == ELeoCmd::Text)
+		{
+			const auto It = SeenTextIds.find(Cmd.TextId);
+			if (It == SeenTextIds.end()) { SeenTextIds.emplace(Cmd.TextId, Cmd.Line); }
+			else
+			{
+				C.AddDiag(ELeoDiag::E_DUP_TEXT_ID, Cmd.Line,
+					"显式文本 ID 重复: " + Cmd.TextId + "（首见于第 " + std::to_string(It->second) + " 行）");
+			}
+		}
 		if (Cmd.Kind == ELeoCmd::Jump || Cmd.Kind == ELeoCmd::JumpIf)
 		{
 			auto It = C.Prog.LabelIndex.find(Cmd.Label);
@@ -1102,6 +1162,16 @@ FLeoProgram CompileChapter(const std::string& SourceUtf8, const std::string& Sou
 		{
 			for (FLeoOption& Opt : Cmd.Options)
 			{
+				if (!Opt.TextId.empty())
+				{
+					const auto It = SeenTextIds.find(Opt.TextId);
+					if (It == SeenTextIds.end()) { SeenTextIds.emplace(Opt.TextId, Cmd.Line); }
+					else
+					{
+						C.AddDiag(ELeoDiag::E_DUP_TEXT_ID, Cmd.Line,
+							"选项显式文本 ID 重复: " + Opt.TextId + "（首见于第 " + std::to_string(It->second) + " 行）");
+					}
+				}
 				auto It = C.Prog.LabelIndex.find(Opt.TargetLabel);
 				if (It == C.Prog.LabelIndex.end())
 				{

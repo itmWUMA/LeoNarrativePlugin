@@ -3,6 +3,8 @@
 #include "Audio/LeoAudioAdapter.h"
 #include "Data/LeoAssetManifest.h"
 #include "Data/LeoScenarioGraph.h"
+#include "Internationalization/Culture.h"
+#include "Internationalization/Internationalization.h"
 #include "Presentation/LeoDialogueWidget.h"
 #include "Save/LeoSaveGame.h"
 #include "ScriptRuntime/LeoScriptBridge.h"
@@ -38,7 +40,27 @@ void ULeoNarrativeSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	// GameInstanceSubsystem 没有 Tick，用核心 Ticker 驱动 VM（游戏线程）
 	TickerHandle = FTSTicker::GetCoreTicker().AddTicker(
 		FTickerDelegate::CreateUObject(this, &ULeoNarrativeSubsystem::TickVM));
+	// 当前语言的剧本译文表（无对应目录 = 表空，全部回落原文）
+	L10n.LoadCulture(GetCurrentLanguage());
 	UE_LOG(LogLeoNarrative, Log, TEXT("LeoNarrative 子系统初始化完成"));
+}
+
+bool ULeoNarrativeSubsystem::SetLanguage(const FString& Culture)
+{
+	FInternationalization& I18N = FInternationalization::Get();
+	if (!I18N.SetCurrentCulture(*Culture))
+	{
+		UE_LOG(LogLeoNarrative, Error, TEXT("SetLanguage: 未知文化 %s"), *Culture);
+		return false;
+	}
+	const bool bLoaded = L10n.LoadCulture(Culture);
+	UE_LOG(LogLeoNarrative, Display, TEXT("[语言] %s（%d 条译文）"), *Culture, L10n.NumEntries());
+	return bLoaded;
+}
+
+FString ULeoNarrativeSubsystem::GetCurrentLanguage() const
+{
+	return FInternationalization::Get().GetCurrentCulture()->GetName();
 }
 
 void ULeoNarrativeSubsystem::Deinitialize()
@@ -152,33 +174,48 @@ bool ULeoNarrativeSubsystem::ResumeWith(FName Token, const leo::FLeoValue& Paylo
 
 void ULeoNarrativeSubsystem::HandleVMEvent(const FLeoEvent& Ev)
 {
-	// 调试器事件流（环形缓冲，先于转发记录）
-	AppendEventLog(Ev);
+	// 本地化替换：只改显示文本，TextId/锚点/已读记录不动；查不到译文回落原文
+	FLeoEvent Display = Ev;
+	if (Display.Kind == ELeoEventKind::Text)
+	{
+		FString T;
+		if (L10n.Resolve(Display.TextId, T)) { Display.Text = MoveTemp(T); }
+	}
+	else if (Display.Kind == ELeoEventKind::ChoiceShown)
+	{
+		for (FLeoEventOption& O : Display.Options)
+		{
+			FString T;
+			if (L10n.Resolve(O.TextId, T)) { O.Text = MoveTemp(T); }
+		}
+	}
+	// 调试器事件流（环形缓冲，记录玩家实际看到的文本，先于转发）
+	AppendEventLog(Display);
 	// 关键事件留 Display 级日志：无 UI 场景（命令行/自动化）也能看到叙事流
-	switch (Ev.Kind)
+	switch (Display.Kind)
 	{
 	case ELeoEventKind::ChapterStart:
-		UE_LOG(LogLeoNarrative, Display, TEXT("── 章节开始: %s ──"), *Ev.Chapter.ToString());
+		UE_LOG(LogLeoNarrative, Display, TEXT("── 章节开始: %s ──"), *Display.Chapter.ToString());
 		break;
 	case ELeoEventKind::Text:
 		ReadTextIds.Add(Ev.TextId);
-		UE_LOG(LogLeoNarrative, Display, TEXT("[%s] %s"), *Ev.Speaker, *Ev.Text);
+		UE_LOG(LogLeoNarrative, Display, TEXT("[%s] %s"), *Display.Speaker, *Display.Text);
 		break;
 	case ELeoEventKind::ChoiceShown:
 	{
 		FString Joined;
-		for (int32 i = 0; i < Ev.Options.Num(); ++i)
+		for (int32 i = 0; i < Display.Options.Num(); ++i)
 		{
-			Joined += FString::Printf(TEXT("\n  %d. %s -> %s"), i, *Ev.Options[i].Text, *Ev.Options[i].TargetLabel);
+			Joined += FString::Printf(TEXT("\n  %d. %s -> %s"), i, *Display.Options[i].Text, *Display.Options[i].TargetLabel);
 		}
 		UE_LOG(LogLeoNarrative, Display, TEXT("[选项]%s"), *Joined);
 		break;
 	}
 	case ELeoEventKind::ChoiceMade:
-		UE_LOG(LogLeoNarrative, Display, TEXT("[选择] %d -> %s"), Ev.ChoiceIndex, *Ev.TextId);
+		UE_LOG(LogLeoNarrative, Display, TEXT("[选择] %d -> %s"), Display.ChoiceIndex, *Display.TextId);
 		break;
 	case ELeoEventKind::ChapterEnd:
-		UE_LOG(LogLeoNarrative, Display, TEXT("── 章节结束: %s ──"), *Ev.Chapter.ToString());
+		UE_LOG(LogLeoNarrative, Display, TEXT("── 章节结束: %s ──"), *Display.Chapter.ToString());
 		if (IsGraphActive())
 		{
 			bGraphAdvancePending = true; // 延迟到帧末推进：当前正处于 VM 事件广播内
@@ -187,7 +224,7 @@ void ULeoNarrativeSubsystem::HandleVMEvent(const FLeoEvent& Ev)
 	default:
 		break;
 	}
-	OnLeoEvent.Broadcast(Ev);
+	OnLeoEvent.Broadcast(Display);
 }
 
 bool ULeoNarrativeSubsystem::TickVM(float DeltaSeconds)
@@ -530,8 +567,16 @@ void ULeoNarrativeSubsystem::AppendEventLog(const FLeoEvent& Ev)
 	case ELeoEventKind::Se:    S = FString::Printf(TEXT("[SE] %s"), *Ev.AssetId.ToString()); break;
 	case ELeoEventKind::Voice: S = FString::Printf(TEXT("[语音] %s"), *Ev.AssetId.ToString()); break;
 	case ELeoEventKind::ChoiceShown:
-		S = FString::Printf(TEXT("[选项] %d 项"), Ev.Options.Num());
+	{
+		FString Texts;
+		for (int32 i = 0; i < Ev.Options.Num(); ++i)
+		{
+			if (i > 0) { Texts += TEXT(" / "); }
+			Texts += Ev.Options[i].Text;
+		}
+		S = FString::Printf(TEXT("[选项] %d 项: %s"), Ev.Options.Num(), *Texts);
 		break;
+	}
 	case ELeoEventKind::ChoiceMade: S = FString::Printf(TEXT("[选择] %d"), Ev.ChoiceIndex); break;
 	case ELeoEventKind::ChapterEnd: S = FString::Printf(TEXT("── 章节结束 %s"), *Ev.Chapter.ToString()); break;
 	case ELeoEventKind::RuntimeError:

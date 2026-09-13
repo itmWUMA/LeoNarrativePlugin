@@ -1,4 +1,5 @@
 #include "VM/LeoVM.h"
+#include "L10n/LeoLocalization.h"
 #include "ScriptRuntime/LeoScriptBridge.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogLeoVM, Log, All);
@@ -264,23 +265,46 @@ void ULeoVM::ComputeTextAnchor(int32 TextPC, FName& OutLabel, int32& OutSeq) con
 	OutLabel = TEXT("_root");
 }
 
+void ULeoVM::ComputeChoiceAnchor(int32 ChoicePC, FName& OutLabel, int32& OutSeq) const
+{
+	OutSeq = 0;
+	for (int32 i = ChoicePC; i >= 0; --i)
+	{
+		const leo::FLeoCommand& C = Program->Commands[i];
+		if (C.Kind == leo::ELeoCmd::Choice && i < ChoicePC) { ++OutSeq; }
+		if (C.Kind == leo::ELeoCmd::Label)
+		{
+			OutLabel = FName(C.Label.c_str());
+			return;
+		}
+	}
+	OutLabel = TEXT("_root");
+}
+
 // ---- 命令处理器 ----
 
 ULeoVM::EResult ULeoVM::HandleNop(const leo::FLeoCommand&) { return EResult::Next; }
 
 ULeoVM::EResult ULeoVM::HandleText(const leo::FLeoCommand& C)
 {
-	FName Label;
-	int32 Seq = 0;
-	ComputeTextAnchor(PC, Label, Seq);
-
 	FLeoEvent Ev;
 	Ev.Kind = ELeoEventKind::Text;
 	Ev.Chapter = Chapter;
 	Ev.Line = C.Line;
 	Ev.Speaker = LeoBridge::ToFString(C.Speaker);
 	Ev.Text = LeoBridge::ToFString(C.Body);
-	Ev.TextId = FString::Printf(TEXT("%s/%s/%d"), *Chapter.ToString(), *Label.ToString(), Seq);
+	// 显式 id= 优先；自动 ID 的拼法单源于 LeoL10n（提取器/freeze 共用）
+	if (!C.TextId.empty())
+	{
+		Ev.TextId = LeoBridge::ToFString(C.TextId);
+	}
+	else
+	{
+		FName Label;
+		int32 Seq = 0;
+		ComputeTextAnchor(PC, Label, Seq);
+		Ev.TextId = LeoL10n::MakeTextId(Chapter.ToString(), Label.ToString(), Seq);
+	}
 	Broadcast(std::move(Ev));
 	SuspendToken = TEXT("click");
 	State = ELeoVMState::WaitClick;
@@ -419,8 +443,16 @@ ULeoVM::EResult ULeoVM::HandleSet(const leo::FLeoCommand& C)
 ULeoVM::EResult ULeoVM::HandleChoice(const leo::FLeoCommand& C)
 {
 	ActiveOptions.Reset();
-	for (const leo::FLeoOption& Opt : C.Options)
+	// 选项自动 ID 用"label 内第几个 choice + 静态选项下标"（与提取器同一拼法；
+	// 条件过滤会移除选项，不能用过滤后的下标，否则译文对不上号）
+	FName Label;
+	int32 ChoiceSeq = 0;
+	ComputeChoiceAnchor(PC, Label, ChoiceSeq);
+	const FString ChapterStr = Chapter.ToString(), LabelStr = Label.ToString();
+	TArray<FString> OptionIds; // 与 ActiveOptions 平行（按下标对应）
+	for (int32 StaticIdx = 0; StaticIdx < static_cast<int32>(C.Options.size()); ++StaticIdx)
 	{
+		const leo::FLeoOption& Opt = C.Options[StaticIdx];
 		if (Opt.ExprIndex >= 0)
 		{
 			leo::FLeoValue V;
@@ -439,6 +471,9 @@ ULeoVM::EResult ULeoVM::HandleChoice(const leo::FLeoCommand& C)
 			if (!V.B) { continue; } // 条件为假：不展示
 		}
 		ActiveOptions.Add(Opt);
+		OptionIds.Add(Opt.TextId.empty()
+			? LeoL10n::MakeOptionId(ChapterStr, LabelStr, ChoiceSeq, StaticIdx)
+			: LeoBridge::ToFString(Opt.TextId));
 	}
 	if (ActiveOptions.Num() == 0)
 	{
@@ -449,11 +484,12 @@ ULeoVM::EResult ULeoVM::HandleChoice(const leo::FLeoCommand& C)
 	Ev.Kind = ELeoEventKind::ChoiceShown;
 	Ev.Chapter = Chapter;
 	Ev.Line = C.Line;
-	for (const leo::FLeoOption& Opt : ActiveOptions)
+	for (int32 i = 0; i < ActiveOptions.Num(); ++i)
 	{
 		FLeoEventOption EO;
-		EO.Text = LeoBridge::ToFString(Opt.Text);
-		EO.TargetLabel = LeoBridge::ToFString(Opt.TargetLabel);
+		EO.Text = LeoBridge::ToFString(ActiveOptions[i].Text);
+		EO.TextId = MoveTemp(OptionIds[i]);
+		EO.TargetLabel = LeoBridge::ToFString(ActiveOptions[i].TargetLabel);
 		Ev.Options.Add(std::move(EO));
 	}
 	Broadcast(std::move(Ev));

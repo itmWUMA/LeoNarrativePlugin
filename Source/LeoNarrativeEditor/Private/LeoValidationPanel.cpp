@@ -1,8 +1,11 @@
 #include "LeoValidationPanel.h"
 
+#include "LeoL10nToolkit.h"
 #include "LeoValidation.h"
 
 #include "Framework/Docking/TabManager.h"
+#include "Framework/Notifications/NotificationManager.h"
+#include "Widgets/Notifications/SNotificationList.h"
 #include "Widgets/Docking/SDockTab.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/SBoxPanel.h"
@@ -11,6 +14,7 @@
 #include "Styling/AppStyle.h"
 #include "Subsystems/AssetEditorSubsystem.h"
 #include "Widgets/Input/SButton.h"
+#include "Widgets/Input/STextComboBox.h"
 #include "Widgets/Layout/SSplitter.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Views/SListView.h"
@@ -26,6 +30,7 @@ struct FLeoFileRow
 	bool bPass = true;
 	bool bIsAssetSection = false; // "资产引用核对" 伪条目
 	bool bIsGraphSection = false; // "编排图核对" 伪条目
+	bool bIsL10nSection = false;  // "本地化核对" 伪条目
 	int32 ItemIndex = -1;         // 对应 Summary.Files 索引
 };
 
@@ -98,6 +103,15 @@ public:
 		GraphRow->bIsGraphSection = true;
 		FileRows.Add(GraphRow);
 
+		const TSharedPtr<FLeoFileRow> L10nRow = MakeShared<FLeoFileRow>();
+		const bool bL10nOk = Summary.L10nErrors == 0;
+		L10nRow->Display = Summary.L10nCultures == 0
+			? TEXT("○  本地化核对（未启用，跳过）")
+			: FString::Printf(TEXT("%s  本地化核对（%d 种语言）"), bL10nOk ? TEXT("√") : TEXT("×"), Summary.L10nCultures);
+		L10nRow->bPass = bL10nOk;
+		L10nRow->bIsL10nSection = true;
+		FileRows.Add(L10nRow);
+
 		SelectedFileRow = nullptr;
 		RebuildDiags();
 		if (FileList.IsValid()) { FileList.Pin()->RequestListRefresh(); }
@@ -127,6 +141,13 @@ public:
 				for (const LeoValidation::FLeoCheckItem& It : Summary.GraphItems)
 				{
 					AddDiag(It, It.File); // 双击打开对应图资产
+				}
+			}
+			else if (SelectedFileRow->bIsL10nSection)
+			{
+				for (const LeoValidation::FLeoCheckItem& It : Summary.L10nItems)
+				{
+					AddDiag(It, It.File); // 双击用系统关联程序打开 CSV
 				}
 			}
 			else if (Summary.Files.IsValidIndex(SelectedFileRow->ItemIndex))
@@ -180,6 +201,17 @@ void OpenDiagTarget(const FString& Target)
 	}
 }
 
+void ShowPanelNotification(const FText& Text, SNotificationItem::ECompletionState State)
+{
+	FNotificationInfo Info(Text);
+	Info.bUseSuccessFailIcons = true;
+	Info.ExpireDuration = 6.f;
+	if (TSharedPtr<SNotificationItem> Item = FSlateNotificationManager::Get().AddNotification(Info))
+	{
+		Item->SetCompletionState(State);
+	}
+}
+
 // 面板主体
 class SLeoValidationPanel : public SCompoundWidget
 {
@@ -192,6 +224,7 @@ public:
 	{
 		State = MakeShared<FLeoValidationPanelState>();
 		State->Init(); // 构造后绑定委托 + 首次校验（共享引用已就位）
+		RebuildCultureOptions(); // 语言下拉选项（组合框创建前就位，保证默认选中有效）
 
 		ChildSlot
 		[
@@ -208,6 +241,49 @@ public:
 						State->Refresh();
 						return FReply::Handled();
 					})
+				]
+				// 本地化提取：语言下拉（种子项 ∪ Content/L10n 已有目录）→ extract → 通知 + 刷新
+				+ SHorizontalBox::Slot().AutoWidth().Padding(12, 0, 4, 0).VAlign(VAlign_Center)
+				[
+					SNew(SButton)
+					.Text(LOCTEXT("ExtractL10n", "提取译文 CSV"))
+					.ToolTipText(LOCTEXT("ExtractL10nTip", "从 Content/Scripts 提取文本 ID 与原文到 Content/L10n/<语言>/<章节>.csv（增量合并，不覆盖已有译文）"))
+					.OnClicked_Lambda([this]
+					{
+						const FString Culture = SelectedCulture.IsValid() ? *SelectedCulture : FString(TEXT("en"));
+						const int32 Failures = LeoL10nToolkit::ExtractForCultures({ Culture });
+						ShowPanelNotification(
+							FText::FromString(FString::Printf(TEXT("%s 译文 CSV 提取%s（%d 失败，详见 Output Log）"),
+								*Culture, Failures == 0 ? TEXT("完成") : TEXT("有失败"), Failures)),
+							Failures == 0 ? SNotificationItem::CS_Success : SNotificationItem::CS_Fail);
+						State->Refresh(); // extract 触发 watcher 也会刷新，这里立即刷一次避免竞态
+						RebuildCultureOptions(); // 刚建出的语言目录要能立刻在下拉里看到
+						if (CultureCombo.IsValid()) { CultureCombo->RefreshOptions(); }
+						return FReply::Handled();
+					})
+				]
+				+ SHorizontalBox::Slot().AutoWidth().Padding(0, 2).VAlign(VAlign_Center)
+				[
+					SNew(SBox).WidthOverride(120.f)
+					[
+						SAssignNew(CultureCombo, STextComboBox)
+						.OptionsSource(&CultureOptions)
+						.InitiallySelectedItem(SelectedCulture)
+						.ToolTipText(LOCTEXT("CultureComboTip", "目标语言（已有译文目录置顶标 ●，其余为引擎支持的语言全集）；选中即提取该语言"))
+						.OnGetTextLabelForItem_Lambda([this](TSharedPtr<FString> Item) -> FString
+						{
+							return Item.IsValid() ? CultureLabels.FindRef(*Item) : FString();
+						})
+						.OnSelectionChanged_Lambda([this](TSharedPtr<FString> NewSel, ESelectInfo::Type)
+						{
+							SelectedCulture = NewSel;
+						})
+						.OnComboBoxOpening_Lambda([this]()
+						{
+							RebuildCultureOptions(); // 打开下拉即发现新目录（重建保指针，选择不丢）
+							if (CultureCombo.IsValid()) { CultureCombo->RefreshOptions(); }
+						})
+					]
 				]
 				+ SHorizontalBox::Slot().FillWidth(1.f).Padding(8, 2).VAlign(VAlign_Center)
 				[
@@ -308,16 +384,44 @@ private:
 	FText BuildSummaryText() const
 	{
 		const LeoValidation::FLeoValidateSummary& S = State->Summary;
-		return FText::FromString(FString::Printf(TEXT("%d 个文件，%d 不符预期；清单 %s（资产错误 %d）%s"),
+		FString L10nPart = S.L10nCultures == 0 ? TEXT("本地化未启用") :
+			FString::Printf(TEXT("本地化 %d 种语言（错误 %d）"), S.L10nCultures, S.L10nErrors);
+		return FText::FromString(FString::Printf(TEXT("%d 个文件，%d 不符预期；清单 %s（资产错误 %d）；%s%s"),
 			S.Files.Num(), S.Failures,
 			S.ManifestPath.IsEmpty() ? TEXT("未找到") : *S.ManifestPath,
-			S.AssetErrors,
+			S.AssetErrors, *L10nPart,
 			S.AllGreen() ? TEXT("—— 全绿") : TEXT("")));
 	}
 
 	TSharedPtr<FLeoValidationPanelState> State;
 	TSharedPtr<SListView<FLeoFileRowPtr>> FileListView;
 	TSharedPtr<SListView<FLeoDiagRowPtr>> DiagListView;
+	TSharedPtr<STextComboBox> CultureCombo;
+	TArray<TSharedPtr<FString>> CultureOptions; // 组合框数据源（重建保指针，选择不丢）
+	TMap<FString, FString> CultureLabels;      // 码 → 显示名（"日本語 (ja) ●"）
+	TSharedPtr<FString> SelectedCulture;
+
+	// 语言选项 = 已有译文目录（置顶标 ●）∪ 引擎本地化语言全集（见 LeoL10nToolkit::BuildCultureChoices）
+	void RebuildCultureOptions()
+	{
+		TArray<LeoL10nToolkit::FCultureChoice> Choices;
+		LeoL10nToolkit::BuildCultureChoices(Choices);
+		for (const LeoL10nToolkit::FCultureChoice& Ch : Choices)
+		{
+			const bool bExists = CultureOptions.ContainsByPredicate(
+				[&Ch](const TSharedPtr<FString>& P) { return P.IsValid() && *P == Ch.Code; });
+			if (!bExists) { CultureOptions.Add(MakeShared<FString>(Ch.Code)); }
+			CultureLabels.Add(Ch.Code, Ch.bHasCsv ? Ch.Label + TEXT("  ●已有译文") : Ch.Label);
+		}
+		if (!SelectedCulture.IsValid())
+		{
+			for (const TSharedPtr<FString>& P : CultureOptions)
+			{
+				if (P.IsValid() && *P == TEXT("en")) { SelectedCulture = P; break; }
+			}
+			if (!SelectedCulture.IsValid() && CultureOptions.Num() > 0) { SelectedCulture = CultureOptions[0]; }
+		}
+	}
 };
 
 const FName GValidationTabName(TEXT("LeoNarrativeValidationPanel"));

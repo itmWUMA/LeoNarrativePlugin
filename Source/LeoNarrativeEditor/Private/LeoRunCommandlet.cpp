@@ -42,7 +42,14 @@ int32 ULeoRunCommandlet::Main(const FString& Params)
 	}
 	UE_LOG(LogLeoRun, Display, TEXT("游戏实例就绪，执行: %s"), *ExecStr);
 
-	GEngine->Exec(World, *ExecStr);
+	// 分号串联多条命令（控制台 Exec 不自行拆分），按序派发；
+	// 各 leo.* 命令内部经 RunWhenSubsystemReady 排队，顺序保持
+	TArray<FString> Cmds;
+	ExecStr.ParseIntoArray(Cmds, TEXT(";"), true);
+	for (const FString& Cmd : Cmds)
+	{
+		GEngine->Exec(World, *Cmd);
+	}
 
 	// 泵帧：只驱动核心 ticker（VM 驱动）。世界 tick 在命令行环境可能长时间阻塞，
 	// 且序列播放可由测试侧手动泵（leo.demo seq 内部已处理）。

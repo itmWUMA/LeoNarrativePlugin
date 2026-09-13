@@ -25,37 +25,66 @@ namespace
 void FLeoEditorWatcher::Start()
 {
 	const FString Dir = FPaths::ProjectContentDir() / TEXT("Scripts");
-	if (!FPaths::DirectoryExists(Dir))
+	if (FPaths::DirectoryExists(Dir))
 	{
-		return; // 工程还没有剧本目录：不监听
+		FDirectoryWatcherModule& DW = FModuleManager::LoadModuleChecked<FDirectoryWatcherModule>("DirectoryWatcher");
+		DW.Get()->RegisterDirectoryChangedCallback_Handle(
+			Dir,
+			IDirectoryWatcher::FDirectoryChanged::CreateRaw(this, &FLeoEditorWatcher::OnScriptsDirChanged),
+			ScriptWatchHandle);
+		UE_LOG(LogTemp, Log, TEXT("[Leo] 已监听剧本目录: %s"), *Dir);
 	}
-	FDirectoryWatcherModule& DW = FModuleManager::LoadModuleChecked<FDirectoryWatcherModule>("DirectoryWatcher");
-	DW.Get()->RegisterDirectoryChangedCallback_Handle(
-		Dir,
-		IDirectoryWatcher::FDirectoryChanged::CreateRaw(this, &FLeoEditorWatcher::OnDirectoryChanged),
-		WatchHandle);
-	UE_LOG(LogTemp, Log, TEXT("[Leo] 已监听剧本目录: %s"), *Dir);
+	else
+	{
+		UE_LOG(LogTemp, Log, TEXT("[Leo] 工程还没有剧本目录，跳过监听"));
+	}
+
+	// 译文目录（递归含各语言子目录）：CSV 保存 → 校验中心刷新本地化核对
+	const FString L10nDir = FPaths::ProjectContentDir() / TEXT("L10n");
+	if (FPaths::DirectoryExists(L10nDir))
+	{
+		FDirectoryWatcherModule& DW = FModuleManager::LoadModuleChecked<FDirectoryWatcherModule>("DirectoryWatcher");
+		DW.Get()->RegisterDirectoryChangedCallback_Handle(
+			L10nDir,
+			IDirectoryWatcher::FDirectoryChanged::CreateRaw(this, &FLeoEditorWatcher::OnL10nDirChanged),
+			L10nWatchHandle);
+		UE_LOG(LogTemp, Log, TEXT("[Leo] 已监听译文目录: %s"), *L10nDir);
+	}
 }
 
 void FLeoEditorWatcher::Stop()
 {
-	if (WatchHandle.IsValid())
+	if (ScriptWatchHandle.IsValid())
 	{
 		if (FDirectoryWatcherModule* DW = FModuleManager::GetModulePtr<FDirectoryWatcherModule>("DirectoryWatcher"))
 		{
 			const FString Dir = FPaths::ProjectContentDir() / TEXT("Scripts");
-			DW->Get()->UnregisterDirectoryChangedCallback_Handle(Dir, WatchHandle);
+			DW->Get()->UnregisterDirectoryChangedCallback_Handle(Dir, ScriptWatchHandle);
 		}
-		WatchHandle.Reset();
+		ScriptWatchHandle.Reset();
+	}
+	if (L10nWatchHandle.IsValid())
+	{
+		if (FDirectoryWatcherModule* DW = FModuleManager::GetModulePtr<FDirectoryWatcherModule>("DirectoryWatcher"))
+		{
+			const FString L10nDir = FPaths::ProjectContentDir() / TEXT("L10n");
+			DW->Get()->UnregisterDirectoryChangedCallback_Handle(L10nDir, L10nWatchHandle);
+		}
+		L10nWatchHandle.Reset();
 	}
 	if (DebounceHandle.IsValid())
 	{
 		FTSTicker::GetCoreTicker().RemoveTicker(DebounceHandle);
 		DebounceHandle.Reset();
 	}
+	if (L10nDebounceHandle.IsValid())
+	{
+		FTSTicker::GetCoreTicker().RemoveTicker(L10nDebounceHandle);
+		L10nDebounceHandle.Reset();
+	}
 }
 
-void FLeoEditorWatcher::OnDirectoryChanged(const TArray<FFileChangeData>& Changes)
+void FLeoEditorWatcher::OnScriptsDirChanged(const TArray<FFileChangeData>& Changes)
 {
 	for (const FFileChangeData& C : Changes)
 	{
@@ -75,6 +104,28 @@ void FLeoEditorWatcher::OnDirectoryChanged(const TArray<FFileChangeData>& Change
 			DebounceHandle.Reset();
 			RecompilePending();
 			return false; // 单次
+		});
+}
+
+void FLeoEditorWatcher::OnL10nDirChanged(const TArray<FFileChangeData>& Changes)
+{
+	for (const FFileChangeData& C : Changes)
+	{
+		if (C.Filename.EndsWith(TEXT(".csv"), ESearchCase::IgnoreCase))
+		{
+			bL10nPending = true;
+			break;
+		}
+	}
+	if (!bL10nPending) { return; }
+
+	if (L10nDebounceHandle.IsValid()) { return; }
+	L10nDebounceHandle = FTSTicker::GetCoreTicker().AddTicker(TEXT("LeoL10nRefresh"), 0.5f,
+		[this](float)
+		{
+			L10nDebounceHandle.Reset();
+			FlushL10nPending();
+			return false;
 		});
 }
 
@@ -106,4 +157,14 @@ void FLeoEditorWatcher::RecompilePending()
 	LeoValidation::OnScriptsRevalidated.Broadcast();
 	// 脚本变了 → 变量收割注册表过期（拾取器/补全下次取用时重扫）
 	FLeoVariableHarvest::Get().MarkStale();
+}
+
+void FLeoEditorWatcher::FlushL10nPending()
+{
+	if (!bL10nPending) { return; }
+	bL10nPending = false;
+	// CSV 的对错（解析/撞号/STALE…）由校验中心面板呈现，这里只通知 + 广播刷新
+	ShowNotification(FText::FromString(TEXT("Leo 译文 CSV 已更新（核对结果见校验中心）")),
+		SNotificationItem::CS_None);
+	LeoValidation::OnScriptsRevalidated.Broadcast();
 }

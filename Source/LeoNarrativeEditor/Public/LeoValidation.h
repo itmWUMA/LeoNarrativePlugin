@@ -32,11 +32,14 @@ namespace LeoValidation
 		TArray<FLeoFileResult> Files;
 		TArray<FLeoCheckItem> AssetItems; // 资产引用核对（无清单时为空）
 		TArray<FLeoCheckItem> GraphItems; // 编排图核对（无图资产时为空）
+		TArray<FLeoCheckItem> L10nItems;  // 本地化 CSV 核对（无 Content/L10n 时为空）
 		FString ManifestPath;             // 参与核对的清单资产；空 = 未找到，核对跳过
 		int32 Failures = 0;               // 预期不符的文件数
 		int32 AssetErrors = 0;            // 资产核对错误条数
-		int32 GraphErrors = 0;            // 编排图核对错误条数
-		bool AllGreen() const { return Failures == 0 && AssetErrors == 0 && GraphErrors == 0; }
+		int32 GraphErrors = 0;            // 图核对错误条数
+		int32 L10nErrors = 0;             // 本地化核对错误条数（STALE/GONE 等不算，见 bError）
+		int32 L10nCultures = 0;           // 发现的译文语言数（0 = 未启用本地化）
+		bool AllGreen() const { return Failures == 0 && AssetErrors == 0 && GraphErrors == 0 && L10nErrors == 0; }
 	};
 
 	// 结构化校验（面板消费）。ManifestAssetPath 为空 = 自动发现工程内 ULeoAssetManifest

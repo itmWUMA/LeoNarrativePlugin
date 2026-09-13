@@ -37,6 +37,7 @@ struct FLeoParam
 struct FLeoOption
 {
 	std::string Text;        // 显示文本（原文）
+	std::string TextId;      // 显式稳定 ID（空 = 由框架按 章节/label/c序号/选项号 生成）
 	std::string TargetLabel; // 目标 label 名
 	int TargetIndex = -1;    // 编译后回填的命令索引
 	int ExprIndex = -1;      // 条件表达式池索引；-1 = 无条件
@@ -51,6 +52,7 @@ struct FLeoCommand
 	// text
 	std::string Speaker;          // 空串 = 旁白（脚本里的 "-" 已规范化）
 	std::string Body;
+	std::string TextId;           // 显式稳定 ID（空 = 自动生成 章节/label/序号；本地化送翻前 freeze 写入）
 	// bg/char/bgm/se/voice 的逻辑资源名；char/bgm 用 "-" 表示移除/停止
 	std::string AssetId;
 	// char 槽位名（宽松 Word，允许 CJK）

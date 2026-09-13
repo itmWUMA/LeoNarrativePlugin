@@ -113,6 +113,8 @@ private:
 	void RuntimeError(leo::ELeoDiag Code, int32 Line, const std::string& Msg);
 	// 最近 label 与 label 内 text 序号（TextId 用）
 	void ComputeTextAnchor(int32 TextPC, FName& OutLabel, int32& OutSeq) const;
+	// 最近 label 与 label 内 choice 序号（选项 TextId 用）
+	void ComputeChoiceAnchor(int32 ChoicePC, FName& OutLabel, int32& OutSeq) const;
 
 	TSharedPtr<leo::FLeoProgram> Program;
 	FName Chapter;
