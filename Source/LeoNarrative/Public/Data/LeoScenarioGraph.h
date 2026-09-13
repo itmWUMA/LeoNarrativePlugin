@@ -16,6 +16,20 @@ enum class ELeoScenarioNodeType : uint8
 	Subgraph,  // 进节点 = 跑 SubGraph 子图，子图收束后回到本节点继续走出边
 };
 
+// 边副作用赋值操作符（枚举化消灭自由字符串的静默拼错；DisplayName 即 "= += -= *= /="）
+UENUM()
+enum class ELeoEdgeOp : uint8
+{
+	Assign    UMETA(DisplayName = "="),
+	AddAssign UMETA(DisplayName = "+="),
+	SubAssign UMETA(DisplayName = "-="),
+	MulAssign UMETA(DisplayName = "*="),
+	DivAssign UMETA(DisplayName = "/="),
+};
+
+// 操作符显示串（日志/校验消息用；与 DisplayName 保持一致）
+LEONARRATIVE_API const TCHAR* LeoEdgeOpString(ELeoEdgeOp Op);
+
 // 转移副作用：转移发生时对黑板的一次赋值（等价 set/setg）
 USTRUCT()
 struct FLeoEdgeAction
@@ -25,8 +39,10 @@ struct FLeoEdgeAction
 	FName Key;                      // 黑板键
 	UPROPERTY(EditAnywhere)
 	bool bGlobal = false;           // true = setg（写全局层）
+	UPROPERTY()
+	FString Op;                     // 旧资产的字符串操作符——仅为存量加载保留，PostLoad 迁移到 Operation 后清空，勿再使用
 	UPROPERTY(EditAnywhere)
-	FString Op = TEXT("=");         // = += -= *= /=
+	ELeoEdgeOp Operation = ELeoEdgeOp::Assign;
 	UPROPERTY(EditAnywhere)
 	FString Expr;                   // 值表达式（.leo 表达式）
 };
@@ -82,6 +98,9 @@ public:
 
 	UPROPERTY(EditAnywhere)
 	TArray<FLeoScenarioNode> Nodes;
+
+	// 旧资产迁移：Op 字符串 → Operation 枚举（迁移后清空 Op，重存一次即净）
+	virtual void PostLoad() override;
 
 	const FLeoScenarioNode* FindNode(FName Id) const
 	{

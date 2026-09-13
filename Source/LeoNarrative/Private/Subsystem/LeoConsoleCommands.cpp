@@ -256,11 +256,11 @@ end
 			N2.Id = TEXT("n_route"); N2.Type = ELeoScenarioNodeType::Branch; N2.Caption = INVTEXT("好感度分流");
 			FLeoScenarioEdge B1;
 			B1.To = TEXT("n_recall"); B1.Condition = TEXT("affection >= 1"); B1.Priority = 10;
-			FLeoEdgeAction A1; A1.Key = TEXT("route"); A1.bGlobal = true; A1.Op = TEXT("="); A1.Expr = TEXT("\"recall\"");
+			FLeoEdgeAction A1; A1.Key = TEXT("route"); A1.bGlobal = true; A1.Operation = ELeoEdgeOp::Assign; A1.Expr = TEXT("\"recall\"");
 			B1.Actions = { A1 };
 			FLeoScenarioEdge B2;
 			B2.To = TEXT("e_normal"); B2.Priority = 0;
-			FLeoEdgeAction A2; A2.Key = TEXT("route"); A2.bGlobal = true; A2.Op = TEXT("="); A2.Expr = TEXT("\"normal\"");
+			FLeoEdgeAction A2; A2.Key = TEXT("route"); A2.bGlobal = true; A2.Operation = ELeoEdgeOp::Assign; A2.Expr = TEXT("\"normal\"");
 			B2.Actions = { A2 };
 			N2.Edges = { B1, B2 };
 

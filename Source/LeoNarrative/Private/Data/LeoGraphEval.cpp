@@ -58,22 +58,22 @@ namespace
 	}
 
 	// 数值四则（Int/Int 保持 Int；除法总是 Float；镜像 VM set 语义的简化版）
-	bool NumericOp(const leo::FLeoValue& A, const leo::FLeoValue& B, const FString& Op, leo::FLeoValue& Out)
+	bool NumericOp(const leo::FLeoValue& A, const leo::FLeoValue& B, ELeoEdgeOp Op, leo::FLeoValue& Out)
 	{
 		if (!A.IsNumber() || !B.IsNumber()) { return false; }
 		const double a = A.AsDouble(), b = B.AsDouble();
 		double r = 0.0;
-		if (Op == TEXT("+")) { r = a + b; }
-		else if (Op == TEXT("-")) { r = a - b; }
-		else if (Op == TEXT("*")) { r = a * b; }
-		else if (Op == TEXT("/"))
+		switch (Op)
 		{
+		case ELeoEdgeOp::AddAssign: r = a + b; break;
+		case ELeoEdgeOp::SubAssign: r = a - b; break;
+		case ELeoEdgeOp::MulAssign: r = a * b; break;
+		case ELeoEdgeOp::DivAssign:
 			if (b == 0.0) { return false; }
-			r = a / b;
-			Out = leo::FLeoValue::MakeFloat(r);
+			Out = leo::FLeoValue::MakeFloat(a / b);
 			return true;
+		default: return false;
 		}
-		else { return false; }
 		if (A.Kind == leo::FLeoValue::EKind::Int && B.Kind == leo::FLeoValue::EKind::Int)
 		{
 			Out = leo::FLeoValue::MakeInt(static_cast<int64_t>(r));
@@ -136,7 +136,8 @@ void ApplyActions(const FLeoScenarioEdge& Edge, UNarrativeBlackboard* Local, UNa
 		std::string Msg;
 		if (!leo::LeoEval(*Expr, MakeResolver(Local, Global), NewV, Code, Msg))
 		{
-			UE_LOG(LogLeoGraphEval, Error, TEXT("边副作用求值失败: %s %s %s"), *A.Key.ToString(), *A.Op, *A.Expr);
+			UE_LOG(LogLeoGraphEval, Error, TEXT("边副作用求值失败: %s %s %s"),
+				*A.Key.ToString(), LeoEdgeOpString(A.Operation), *A.Expr);
 			continue;
 		}
 		// 写入层：setg 写全局；set 优先局部层（无会话局部层时落到全局）
@@ -145,7 +146,7 @@ void ApplyActions(const FLeoScenarioEdge& Edge, UNarrativeBlackboard* Local, UNa
 		const FName Key(A.Key);
 
 		leo::FLeoValue Result;
-		if (A.Op == TEXT("="))
+		if (A.Operation == ELeoEdgeOp::Assign)
 		{
 			Result = NewV;
 		}
@@ -153,8 +154,8 @@ void ApplyActions(const FLeoScenarioEdge& Edge, UNarrativeBlackboard* Local, UNa
 		{
 			leo::FLeoValue Old;
 			const bool bHasOld = MakeResolver(Local, Global)(TCHAR_TO_UTF8(*A.Key.ToString()), Old);
-			const FString BaseOp = A.Op.Left(1); // "+=" → "+"
-			if (A.Op == TEXT("+=") && (Old.Kind == leo::FLeoValue::EKind::String || NewV.Kind == leo::FLeoValue::EKind::String))
+			if (A.Operation == ELeoEdgeOp::AddAssign
+				&& (Old.Kind == leo::FLeoValue::EKind::String || NewV.Kind == leo::FLeoValue::EKind::String))
 			{
 				// 字符串拼接（镜像 VM：String += String）
 				if (bHasOld && Old.Kind == leo::FLeoValue::EKind::String && NewV.Kind == leo::FLeoValue::EKind::String)
@@ -163,20 +164,21 @@ void ApplyActions(const FLeoScenarioEdge& Edge, UNarrativeBlackboard* Local, UNa
 				}
 				else
 				{
-					UE_LOG(LogLeoGraphEval, Error, TEXT("边副作用类型不兼容: %s %s"), *A.Key.ToString(), *A.Op);
+					UE_LOG(LogLeoGraphEval, Error, TEXT("边副作用类型不兼容: %s %s"),
+						*A.Key.ToString(), LeoEdgeOpString(A.Operation));
 					continue;
 				}
 			}
-			else if (!bHasOld || !NumericOp(Old, NewV, BaseOp, Result))
+			else if (!bHasOld || !NumericOp(Old, NewV, A.Operation, Result))
 			{
 				UE_LOG(LogLeoGraphEval, Error, TEXT("边副作用不合法: %s %s（复合赋值需已有数值或字符串）"),
-					*A.Key.ToString(), *A.Op);
+					*A.Key.ToString(), LeoEdgeOpString(A.Operation));
 				continue;
 			}
 		}
 		Scope->SetValue(Key, Result);
 		UE_LOG(LogLeoGraphEval, Verbose, TEXT("边副作用: %s%s%s → %s"), *A.Key.ToString(),
-			A.bGlobal ? TEXT("(g)") : TEXT(""), *A.Op, *LeoBridge::ToFString(Result.ToString()));
+			A.bGlobal ? TEXT("(g)") : TEXT(""), LeoEdgeOpString(A.Operation), *LeoBridge::ToFString(Result.ToString()));
 	}
 }
 

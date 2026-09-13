@@ -2,6 +2,7 @@
 
 #include "Data/LeoAssetManifest.h"
 #include "Data/LeoScenarioGraph.h"
+#include "LeoConditionCodec.h"
 #include "ScriptRuntime/LeoScriptBridge.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
@@ -223,8 +224,9 @@ namespace
 	}
 
 	// 单图结构核对（纯函数：正常图与破损图都走这里，自测复用）
+	// WrittenVars：全工程已知"有写入"的变量集合（脚本 set/setg + 全部图的边副作用 Key）——拼写检查基准
 	void CheckGraph(const ULeoScenarioGraph* G, const FString& DisplayName,
-		const TMap<FName, TSet<FName>>& ChapterLabels,
+		const TMap<FName, TSet<FName>>& ChapterLabels, const TSet<FName>& WrittenVars,
 		TArray<FLeoCheckItem>& Out, int32& OutErrors)
 	{
 		auto Add = [&](int32 NodeIdx, const FString& Code, const FString& Msg, bool bError)
@@ -249,29 +251,50 @@ namespace
 			if (SeenIds.Contains(N.Id)) { Add(i, TEXT("GRAPH_DUP_ID"), FString::Printf(TEXT("节点 Id 重复: %s"), *N.Id.ToString()), true); }
 			SeenIds.Add(N.Id);
 
-			// 出边存在性 + 表达式可编译
+			// 出边存在性 + 表达式可编译 + 变量拼写检查
 			for (const FLeoScenarioEdge& E : N.Edges)
 			{
 				if (!G->FindNode(E.To))
 				{
 					Add(i, TEXT("GRAPH_DANGLING_EDGE"), FString::Printf(TEXT("边指向不存在的节点: %s"), *E.To.ToString()), true);
 				}
+				TArray<FString> Reads;
 				if (!E.Condition.TrimStartAndEnd().IsEmpty())
 				{
 					leo::FLeoDiag D;
-					if (!LeoBridge::CompileExpr(E.Condition, D))
+					const leo::FLeoExprPtr Expr = LeoBridge::CompileExpr(E.Condition, D);
+					if (!Expr)
 					{
 						Add(i, TEXT("GRAPH_BAD_EXPR"), FString::Printf(TEXT("边条件编译失败: %s (%s)"),
 							*E.Condition, LeoBridge::DiagName(D.Code)), true);
+					}
+					else
+					{
+						LeoBridge::CollectExprReadsFrom(Expr, Reads);
 					}
 				}
 				for (const FLeoEdgeAction& A : E.Actions)
 				{
 					leo::FLeoDiag D;
-					if (A.Key.IsNone() || !LeoBridge::CompileExpr(A.Expr, D))
+					const leo::FLeoExprPtr ActionExpr = LeoBridge::CompileExpr(A.Expr, D);
+					if (A.Key.IsNone() || !ActionExpr)
 					{
 						Add(i, TEXT("GRAPH_BAD_ACTION"), FString::Printf(TEXT("边副作用不合法: %s %s %s"),
-							*A.Key.ToString(), *A.Op, *A.Expr), true);
+							*A.Key.ToString(), LeoEdgeOpString(A.Operation), *A.Expr), true);
+					}
+					else
+					{
+						LeoBridge::CollectExprReadsFrom(ActionExpr, Reads);
+					}
+				}
+				// 未知变量：从未被任何 set/setg/边副作用写入——游戏代码写入的变量可忽略，此处只警告
+				for (const FString& Read : Reads)
+				{
+					if (!WrittenVars.Contains(FName(*Read)))
+					{
+						Add(i, TEXT("GRAPH_UNKNOWN_VAR"), FString::Printf(
+							TEXT("变量 %s 从未被写入（set/setg/边副作用均无）——拼写错误？由游戏代码写入可忽略"),
+							*Read), false);
 					}
 				}
 			}
@@ -339,21 +362,38 @@ namespace
 		}
 	}
 
-	// 发现 /Game 下的编排图资产并核对（无图 = 跳过）
-	void CheckAllGraphAssets(const TMap<FName, TSet<FName>>& ChapterLabels,
+	// 发现 /Game 下的编排图资产并核对（无图 = 跳过）。
+	// 先收齐全部图的边副作用 Key 再逐图核对——跨图写入也算已知变量
+	void CheckAllGraphAssets(const TMap<FName, TSet<FName>>& ChapterLabels, const TSet<FName>& ScriptWrittenVars,
 		TArray<FLeoCheckItem>& Out, int32& OutErrors)
 	{
 		FAssetRegistryModule& ARM = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
 		IAssetRegistry* Reg = &ARM.GetRegistry();
 		TArray<FAssetData> Found;
 		Reg->GetAssetsByClass(ULeoScenarioGraph::StaticClass()->GetClassPathName(), Found, true);
+
+		TArray<TPair<FString, ULeoScenarioGraph*>> Graphs;
+		TSet<FName> WrittenVars = ScriptWrittenVars;
 		for (const FAssetData& Data : Found)
 		{
 			if (!Data.GetObjectPathString().StartsWith(TEXT("/Game"))) { continue; }
-			if (ULeoScenarioGraph* G = Cast<ULeoScenarioGraph>(StaticLoadObject(ULeoScenarioGraph::StaticClass(), nullptr, *Data.GetObjectPathString())))
+			ULeoScenarioGraph* G = Cast<ULeoScenarioGraph>(StaticLoadObject(ULeoScenarioGraph::StaticClass(), nullptr, *Data.GetObjectPathString()));
+			if (!G) { continue; }
+			Graphs.Emplace(Data.GetObjectPathString(), G);
+			for (const FLeoScenarioNode& N : G->Nodes)
 			{
-				CheckGraph(G, Data.GetObjectPathString(), ChapterLabels, Out, OutErrors);
+				for (const FLeoScenarioEdge& E : N.Edges)
+				{
+					for (const FLeoEdgeAction& A : E.Actions)
+					{
+						if (!A.Key.IsNone()) { WrittenVars.Add(A.Key); }
+					}
+				}
 			}
+		}
+		for (const TPair<FString, ULeoScenarioGraph*>& KV : Graphs)
+		{
+			CheckGraph(KV.Value, KV.Key, ChapterLabels, WrittenVars, Out, OutErrors);
 		}
 	}
 } // namespace
@@ -377,10 +417,11 @@ FLeoValidateSummary ValidateAllStructured(const FString& ManifestAssetPath)
 		}
 	};
 
-	// 宿主工程剧本（同时提取资源引用 + 章节 label 表）
-	TMap<FName, FLeoAssetUsage> Usages;
-	TMap<FName, TSet<FName>> ChapterLabels;
-	const FString ScriptsDir = FPaths::ProjectContentDir() / TEXT("Scripts");
+	// 宿主工程剧本（同时提取资源引用 + 章节 label 表 + 变量写入集合）
+		TMap<FName, FLeoAssetUsage> Usages;
+		TMap<FName, TSet<FName>> ChapterLabels;
+		TSet<FName> ScriptWrittenVars;
+		const FString ScriptsDir = FPaths::ProjectContentDir() / TEXT("Scripts");
 	if (FPaths::DirectoryExists(ScriptsDir))
 	{
 		TArray<FString> Files;
@@ -403,6 +444,12 @@ FLeoValidateSummary ValidateAllStructured(const FString& ManifestAssetPath)
 			if (R.bPass && Program.Ok)
 			{
 				CollectAssetUsages(Program, Path, Usages);
+				TArray<LeoBridge::FLeoVarUsageInfo> VarUsages;
+				LeoBridge::CollectProgramVarUsage(Program, VarUsages);
+				for (const LeoBridge::FLeoVarUsageInfo& V : VarUsages)
+				{
+					if (V.bWritten) { ScriptWrittenVars.Add(FName(*V.Name)); }
+				}
 			}
 			if (!R.bPass) { ++Summary.Failures; }
 			Summary.Files.Add(MoveTemp(R));
@@ -456,7 +503,7 @@ FLeoValidateSummary ValidateAllStructured(const FString& ManifestAssetPath)
 	}
 
 	// ---- 编排图核对（无图资产时跳过）----
-	CheckAllGraphAssets(ChapterLabels, Summary.GraphItems, Summary.GraphErrors);
+	CheckAllGraphAssets(ChapterLabels, ScriptWrittenVars, Summary.GraphItems, Summary.GraphErrors);
 
 	return Summary;
 }
@@ -467,6 +514,7 @@ int32 SelfTestGraphChecks()
 	int32 Failures = 0;
 	TMap<FName, TSet<FName>> Labels;
 	Labels.Add(TEXT("chapter01"), { TEXT("lab_start"), TEXT("lab_ending") });
+	TSet<FName> NoVars; // 自测无脚本上下文：空写入集（未知变量警告不计数，只行使代码路径）
 
 	auto CountErrors = [](TArray<FLeoCheckItem>& Items)
 	{
@@ -484,7 +532,7 @@ int32 SelfTestGraphChecks()
 		FLeoScenarioNode N2; N2.Id = TEXT("e1"); N2.Type = ELeoScenarioNodeType::Ending; N2.EndingId = TEXT("end1");
 		G->Nodes = { N1, N2 };
 		TArray<FLeoCheckItem> Items; int32 Errors = 0;
-		CheckGraph(G, TEXT("selftest-good"), Labels, Items, Errors);
+		CheckGraph(G, TEXT("selftest-good"), Labels, NoVars, Items, Errors);
 		if (Errors != 0) { UE_LOG(LogLeoValidate, Error, TEXT("[selftest-graph] 正常图应 0 错误，实得 %d"), Errors); ++Failures; }
 		else { UE_LOG(LogLeoValidate, Display, TEXT("[selftest-graph] 正常图 0 错误 ✓")); }
 	}
@@ -495,15 +543,53 @@ int32 SelfTestGraphChecks()
 		G->EntryNode = TEXT("missing_entry");
 		FLeoScenarioNode N1; N1.Id = TEXT("n1"); N1.Type = ELeoScenarioNodeType::Chapter; N1.Chapter = TEXT("no_such_chapter");
 		FLeoScenarioEdge E1; E1.To = TEXT("ghost");
-		FLeoScenarioEdge E2; E2.To = TEXT("n2");
+		FLeoScenarioEdge E2; E2.To = TEXT("n2"); E2.Condition = TEXT("typo_var >= 1"); // 未知变量 → 警告（不计入错误数）
 		N1.Edges = { E1, E2 };
 		FLeoScenarioNode N2; N2.Id = TEXT("n2"); N2.Type = ELeoScenarioNodeType::Branch; // 无出边 = 死端
 		G->Nodes = { N1, N2 };
 		TArray<FLeoCheckItem> Items; int32 Errors = 0;
-		CheckGraph(G, TEXT("selftest-bad"), Labels, Items, Errors);
+		CheckGraph(G, TEXT("selftest-bad"), Labels, NoVars, Items, Errors);
 		// 预期：入口缺失 1 + 悬空边 1 + 死端 1 + 章节不存在 1 = 4（无 Ending 可达暂不计入——入口不可达时跳过可达性分析）
 		if (Errors != 4) { UE_LOG(LogLeoValidate, Error, TEXT("[selftest-graph] 破损图应 4 错误，实得 %d"), Errors); ++Failures; }
 		else { UE_LOG(LogLeoValidate, Display, TEXT("[selftest-graph] 破损图 4 错误全检出 ✓")); }
+		// 未知变量拼写检查：typo_var 不在写入集 → 恰好 1 条警告
+		int32 UnknownVars = 0;
+		for (const FLeoCheckItem& It : Items)
+		{
+			if (It.Code == TEXT("GRAPH_UNKNOWN_VAR")) { ++UnknownVars; }
+		}
+		if (UnknownVars == 1) { UE_LOG(LogLeoValidate, Display, TEXT("[selftest-graph] 未知变量警告 1 条检出 ✓")); }
+		else { UE_LOG(LogLeoValidate, Error, TEXT("[selftest-graph] 未知变量警告应 1 条，实得 %d"), UnknownVars); ++Failures; }
+	}
+
+	// 条件编解码往返（下拉模式与表达式同源的保单：拆解 → 重生成必须还原原文）
+	{
+		auto CondCheck = [&Failures](bool bOk, const TCHAR* What)
+		{
+			if (bOk) { UE_LOG(LogLeoValidate, Display, TEXT("[selftest-graph] cond: %s ✓"), What); }
+			else { UE_LOG(LogLeoValidate, Error, TEXT("[selftest-graph] cond: %s 失败"), What); ++Failures; }
+		};
+		TArray<FLeoCondRow> Rows;
+		CondCheck(LeoConditionCodec::Parse(TEXT("affection >= 1 && saw_secret"), Rows) && Rows.Num() == 2
+			&& Rows[0].Var == TEXT("affection") && Rows[0].Op == ELeoCondOp::Ge && Rows[0].Value == TEXT("1")
+			&& Rows[1].Var == TEXT("saw_secret") && Rows[1].Op == ELeoCondOp::IsTrue,
+			TEXT("拆解 && 链为条件行"));
+		CondCheck(LeoConditionCodec::Generate(Rows) == TEXT("affection >= 1 && saw_secret"),
+			TEXT("行→表达式往返一致"));
+		CondCheck(LeoConditionCodec::Parse(TEXT(""), Rows) && Rows.Num() == 0 && LeoConditionCodec::Generate(Rows).IsEmpty(),
+			TEXT("空条件 = 0 行恒真"));
+		CondCheck(LeoConditionCodec::Parse(TEXT("!flag"), Rows) && Rows.Num() == 1
+			&& Rows[0].Op == ELeoCondOp::IsFalse && LeoConditionCodec::Generate(Rows) == TEXT("!flag"),
+			TEXT("否定裸变量往返"));
+		CondCheck(!LeoConditionCodec::Parse(TEXT("a || b"), Rows), TEXT("|| 不拆解（留自定义模式）"));
+		CondCheck(!LeoConditionCodec::Parse(TEXT("x >= y"), Rows), TEXT("变量对变量不拆解"));
+		CondCheck(!LeoConditionCodec::Parse(TEXT("1 <= x"), Rows), TEXT("字面量在左不拆解"));
+		CondCheck(LeoConditionCodec::Parse(TEXT("name == \"mi ka\""), Rows)
+			&& LeoConditionCodec::Generate(Rows) == TEXT("name == \"mi ka\""),
+			TEXT("字符串字面量往返"));
+		CondCheck(LeoConditionCodec::Parse(TEXT("rate != 0.5"), Rows)
+			&& Rows[0].Value == TEXT("0.5") && LeoConditionCodec::Generate(Rows) == TEXT("rate != 0.5"),
+			TEXT("浮点字面量往返"));
 	}
 
 	UE_LOG(LogLeoValidate, Display, TEXT("[selftest-graph] %s"), Failures == 0 ? TEXT("通过") : TEXT("失败"));

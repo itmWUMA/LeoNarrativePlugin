@@ -25,6 +25,44 @@ leo::FLeoExprPtr CompileExpr(const FString& ExprSrc, leo::FLeoDiag& OutDiag)
 	return leo::CompileExprSrc(ToUtf8(ExprSrc), OutDiag);
 }
 
+void CollectExprReadsFrom(const leo::FLeoExprPtr& Expr, TArray<FString>& OutNames)
+{
+	if (!Expr) { return; }
+	std::vector<std::string> Reads;
+	leo::LeoCollectExprReads(*Expr, Reads);
+	for (const std::string& N : Reads)
+	{
+		const FString Name = ToFString(N);
+		if (!OutNames.Contains(Name)) { OutNames.Add(Name); }
+	}
+}
+
+bool CollectExprReads(const FString& ExprSrc, TArray<FString>& OutNames)
+{
+	leo::FLeoDiag D;
+	const leo::FLeoExprPtr Expr = CompileExpr(ExprSrc, D);
+	if (!Expr) { return false; }
+	CollectExprReadsFrom(Expr, OutNames);
+	return true;
+}
+
+void CollectProgramVarUsage(const leo::FLeoProgram& P, TArray<FLeoVarUsageInfo>& Out)
+{
+	std::unordered_map<std::string, leo::FLeoVarUsage> Usage;
+	leo::LeoCollectVarUsage(P, Usage);
+	Out.Reserve(Out.Num() + static_cast<int32>(Usage.size()));
+	for (auto& KV : Usage)
+	{
+		FLeoVarUsageInfo Info;
+		Info.Name = ToFString(KV.first);
+		Info.bRead = KV.second.bRead;
+		Info.bWritten = KV.second.bWritten;
+		Info.bGlobal = KV.second.bGlobal;
+		Info.LitKind = KV.second.LitKind;
+		Out.Add(MoveTemp(Info));
+	}
+}
+
 const TCHAR* DiagName(leo::ELeoDiag Code)
 {
 	// UTF8_TO_TCHAR 返回临时转换器，不能直接外传指针——拷贝到静态缓冲

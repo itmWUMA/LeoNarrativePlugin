@@ -112,6 +112,32 @@ int main()
 	}
 	Check(CompileChapter("text a | b\n\ttext c | d\nend\n", "t9").Diags.empty() == false, "语义: Tab 仍硬报错");
 
+	// ---- 静态分析：变量引用收集（图条件拼写检查 / 编辑器收割的地基）----
+	{
+		const FLeoProgram P = CompileChapter(
+			"set affection = 1\nsetg route = \"a\"\njumpif affection >= 2 && flag -> lab_a\nlabel lab_a\ntext - | x\nend\n", "t10");
+		Check(P.Ok, "分析: 样例章节编译通过");
+		std::unordered_map<std::string, FLeoVarUsage> Usage;
+		LeoCollectVarUsage(P, Usage);
+		Check(Usage.count("affection") == 1
+			&& Usage["affection"].bWritten && !Usage["affection"].bGlobal
+			&& Usage["affection"].bRead
+			&& Usage["affection"].LitKind == FLeoValue::EKind::Int,
+			"分析: set 目标收为局部写入+字面量类型提示");
+		Check(Usage.count("route") == 1
+			&& Usage["route"].bWritten && Usage["route"].bGlobal
+			&& Usage["route"].LitKind == FLeoValue::EKind::String,
+			"分析: setg 目标收为全局写入");
+		Check(Usage.count("flag") == 1 && Usage["flag"].bRead && !Usage["flag"].bWritten,
+			"分析: jumpif 引用但未写入 → 只读（拼写检查的检出目标）");
+		std::vector<std::string> Reads;
+		FLeoDiag D;
+		const FLeoExprPtr E = CompileExprSrc("a + b * 2 > c", D);
+		Check(E != nullptr, "分析: 表达式编译成功");
+		LeoCollectExprReads(*E, Reads);
+		Check(Reads.size() == 3, "分析: 表达式收集 3 个变量名");
+	}
+
 	// ---- golden 语料 + 工程剧本（须在插件根目录运行）----
 	CheckDir(fs::path("tests/golden/pass"), true);
 	CheckDir(fs::path("tests/golden/fail"), false);

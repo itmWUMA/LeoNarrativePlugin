@@ -40,6 +40,14 @@ private:
 	FSlateColor GetTransitionColor() const;
 	const FSlateBrush* GetTransitionIconImage() const;
 
+	// 中点下方的条件摘要标签（"无条件" / 条件缩略）——让边在画布上"开口说话"
+	FString FetchRawCondition() const;
+	FText GetConditionSummary() const;
+	FSlateColor GetConditionColor() const;
+
 	/** 前驱卡片 widget 缓存（hover 联动） */
 	mutable TWeakPtr<SNode> PrevStateNodeWidgetPtr;
+	/** 条件摘要缓存（脏检查：原文变更才重新编解码，避免每帧编译表达式） */
+	mutable FString CachedRawCond;
+	mutable FString CachedSummary;
 };

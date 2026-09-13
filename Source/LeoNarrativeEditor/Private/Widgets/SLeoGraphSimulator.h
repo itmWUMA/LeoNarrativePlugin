@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Blackboard/NarrativeBlackboard.h"
 #include "Data/LeoGraphEval.h"
+#include "Script/LeoTypes.h"
 #include "Widgets/SCompoundWidget.h"
 #include "UObject/GCObject.h"
 #include "SLeoGraphSimulator.generated.h"
@@ -55,7 +56,6 @@ private:
 	void RunNode(FName NodeId);         // 镜像子系统分派（纯图语义）
 	void TransitionFromCurrent();       // 出边转移（含子图弹栈）
 	void Finish(FName EndingId);
-	void ApplyVarsToBoard();
 	void RefreshViews();
 	void NotifyCurrentNode(FName NodeId); // 画布高亮上报（子图内节点上报 NAME_None）
 
@@ -79,10 +79,23 @@ private:
 	// 每边求值结果（当前转移展示）
 	TArray<TPair<FString, bool>> LastEdgeResults;
 
-	// 变量编辑行
-	struct FVarRow { FString Key; FString Expr; };
+	// 变量编辑行：黑板键预览（BT 黑板查看风格）。
+	// 键自动来自收割注册表（脚本 set/setg + 图边副作用），只读展示 + 可编辑的模拟值；
+	// 值单元格直连沙箱黑板（提交即写板），干跑转移的边副作用实时回显到单元格。
+	struct FVarRow
+	{
+		FName Key;
+		bool bGlobal = true;      // 归属层：全局黑板 / 局部黑板（按收割结果分配）
+		bool bUserAdded = false;  // 临时键（名字可编辑，可删）；收割键三项皆否
+		FString Info;             // 灰字：类型提示 + 来源
+		FString Tooltip;
+	};
 	TArray<TSharedRef<FVarRow>> VarRows;
-	void BuildVarRows();  // 重建变量行编辑控件
+	void SyncRowsWithHarvest();  // 收割键 ↔ 行同步（保留既有值与临时行）
+	void RebuildVarWidgets();    // 行控件重建
+	void RefreshVarCells();      // 沙箱黑板 → 值单元格回显
+	bool ReadSandboxValue(FName Key, leo::FLeoValue& Out) const;
+	void WriteSandboxValue(const TSharedRef<FVarRow>& Row, const FString& SourceText);
 	TSharedPtr<class SVerticalBox> VarBox;
 
 	// 转移结果列表

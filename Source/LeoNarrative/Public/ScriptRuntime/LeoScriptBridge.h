@@ -38,4 +38,22 @@ namespace LeoBridge
 	// 编译前注册自定义命令（严格 spec / 宽松名单）
 	LEONARRATIVE_API void SetCustomCommandSpecs(const TArray<FLeoCmdSpec>& Specs);
 	LEONARRATIVE_API void SetCustomCommandNames(const TArray<FString>& Names);
+
+	// ---- 静态分析导出（变量收割注册表 / 图条件拼写检查用） ----
+
+	// 已编译表达式的引用变量名（去重，按发现序）
+	LEONARRATIVE_API void CollectExprReadsFrom(const leo::FLeoExprPtr& Expr, TArray<FString>& OutNames);
+	// 源文本版：编译后收集；编译失败返回 false（诊断由调用方另行编译获取）
+	LEONARRATIVE_API bool CollectExprReads(const FString& ExprSrc, TArray<FString>& OutNames);
+
+	// 整章变量使用：写入（set/setg）与读取（表达式引用）
+	struct FLeoVarUsageInfo
+	{
+		FString Name;
+		bool bRead = false;
+		bool bWritten = false;
+		bool bGlobal = false;
+		leo::FLeoValue::EKind LitKind = leo::FLeoValue::EKind::Null; // 根字面量类型提示
+	};
+	LEONARRATIVE_API void CollectProgramVarUsage(const leo::FLeoProgram& P, TArray<FLeoVarUsageInfo>& Out);
 }

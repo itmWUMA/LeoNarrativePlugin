@@ -1,9 +1,11 @@
 #include "Graph/SGraphNodeLeoEdge.h"
 
 #include "ConnectionDrawingPolicy.h" // FGeometryHelper
+#include "Data/LeoScenarioGraph.h"
 #include "Graph/LeoEdGraph.h"
 #include "Graph/LeoEdGraphNodes.h"
 #include "Layout/Geometry.h"
+#include "LeoConditionCodec.h"
 #include "Misc/Attribute.h"
 #include "SGraphPanel.h"
 #include "Styling/AppStyle.h"
@@ -13,7 +15,9 @@
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
+#include "Widgets/SBoxPanel.h"
 #include "Widgets/SOverlay.h"
+#include "Widgets/Text/STextBlock.h"
 
 /////////////////////////////////////////////////////
 // SGraphNodeLeoEdge
@@ -154,41 +158,57 @@ void SGraphNodeLeoEdge::UpdateGraphNode()
 		.HAlign(HAlign_Center)
 		.VAlign(VAlign_Center)
 		[
-			SNew(SOverlay)
+			SNew(SVerticalBox)
 
-			+ SOverlay::Slot()
-			.Padding(2.0f)
+			// 图标（原二段布局不动）
+			+ SVerticalBox::Slot().HAlign(HAlign_Center).VAlign(VAlign_Center)
 			[
-				SNew(SImage)
-				.Image(FAppStyle::GetBrush("Graph.AnimTransitionNode.ColorSpill"))
-				.ColorAndOpacity(this, &SGraphNodeLeoEdge::GetTransitionColor)
-			]
+				SNew(SOverlay)
 
-			+ SOverlay::Slot()
-			[
-				SNew(SBox)
-				.Padding(4.0f)
+				+ SOverlay::Slot()
+				.Padding(2.0f)
 				[
-					DirectionImage
+					SNew(SImage)
+					.Image(FAppStyle::GetBrush("Graph.AnimTransitionNode.ColorSpill"))
+					.ColorAndOpacity(this, &SGraphNodeLeoEdge::GetTransitionColor)
+				]
+
+				+ SOverlay::Slot()
+				[
+					SNew(SBox)
+					.Padding(4.0f)
+					[
+						DirectionImage
+					]
+				]
+
+				// 选中描边（橙）
+				+ SOverlay::Slot()
+				[
+					SNew(SBorder)
+					.BorderImage(FAppStyle::GetBrush("Graph.AnimTransitionNode.Selection"))
+					.Padding(0)
+					.Visibility_Lambda([this]()
+					{
+						TSharedPtr<SGraphPanel> OwnerPanel = OwnerGraphPanelPtr.Pin();
+						if (!OwnerPanel.IsValid())
+						{
+							return EVisibility::Hidden;
+						}
+
+						return OwnerPanel->SelectionManager.IsNodeSelected(GraphNode) ? EVisibility::HitTestInvisible : EVisibility::Hidden;
+					})
 				]
 			]
 
-			// 选中描边（橙）
-			+ SOverlay::Slot()
+			// 条件摘要标签：无条件金色 / 带条件灰色缩略；不拦截鼠标（点选仍走图标）
+			+ SVerticalBox::Slot().HAlign(HAlign_Center).AutoHeight().Padding(0, 1, 0, 0)
 			[
-				SNew(SBorder)
-				.BorderImage(FAppStyle::GetBrush("Graph.AnimTransitionNode.Selection"))
-				.Padding(0)
-				.Visibility_Lambda([this]()
-				{
-					TSharedPtr<SGraphPanel> OwnerPanel = OwnerGraphPanelPtr.Pin();
-					if (!OwnerPanel.IsValid())
-					{
-						return EVisibility::Hidden;
-					}
-
-					return OwnerPanel->SelectionManager.IsNodeSelected(GraphNode) ? EVisibility::HitTestInvisible : EVisibility::Hidden;
-				})
+				SNew(STextBlock)
+				.Text(this, &SGraphNodeLeoEdge::GetConditionSummary)
+				.ColorAndOpacity(this, &SGraphNodeLeoEdge::GetConditionColor)
+				.Font(FCoreStyle::GetDefaultFontStyle("Regular", 7))
+				.Visibility(EVisibility::HitTestInvisible)
 			]
 		];
 }
@@ -217,6 +237,38 @@ FSlateColor SGraphNodeLeoEdge::GetTransitionColor() const
 const FSlateBrush* SGraphNodeLeoEdge::GetTransitionIconImage() const
 {
 	return FAppStyle::GetBrush("Graph.AnimTransitionNode.Icon");
+}
+
+FString SGraphNodeLeoEdge::FetchRawCondition() const
+{
+	const ULeoEdGraphNode_Edge* EdgeNode = Cast<ULeoEdGraphNode_Edge>(GraphNode);
+	if (!EdgeNode) { return FString(); }
+	const ULeoEdGraph* Owner = Cast<const ULeoEdGraph>(EdgeNode->GetGraph());
+	const ULeoScenarioGraph* Asset = Owner ? Owner->GetLeoGraph() : nullptr;
+	if (!Asset) { return FString(); }
+	const FLeoScenarioNode* N = Asset->FindNode(EdgeNode->FromNodeId);
+	if (!N || !N->Edges.IsValidIndex(EdgeNode->EdgeIndex)) { return FString(); }
+	return N->Edges[EdgeNode->EdgeIndex].Condition;
+}
+
+FText SGraphNodeLeoEdge::GetConditionSummary() const
+{
+	const FString Raw = FetchRawCondition();
+	if (!Raw.Equals(CachedRawCond, ESearchCase::CaseSensitive))
+	{
+		CachedRawCond = Raw;
+		CachedSummary = LeoConditionCodec::Summarize(Raw);
+	}
+	return FText::FromString(CachedSummary);
+}
+
+FSlateColor SGraphNodeLeoEdge::GetConditionColor() const
+{
+	GetConditionSummary(); // 先行脏检查，保证 CachedRawCond 与摘要同步
+	// 无条件边金色（一眼认出默认/顺序边），带条件灰色 subdued
+	return CachedRawCond.TrimStartAndEnd().IsEmpty()
+		? static_cast<FSlateColor>(FStyleColors::Warning)
+		: static_cast<FSlateColor>(FSlateColor::UseSubduedForeground());
 }
 
 int32 SGraphNodeLeoEdge::OnPaint(const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect,

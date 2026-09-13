@@ -84,4 +84,16 @@ struct FLeoProgram
 	std::vector<FLeoDiag> Diags;                              // 全部诊断（含警告）
 };
 
+// 变量使用统计（编辑器收割注册表 / 拼写检查用，内核自身不消费）
+struct FLeoVarUsage
+{
+	bool bRead = false;       // 被表达式引用过（set 值 / jumpif / choice 条件）
+	bool bWritten = false;    // set/setg 目标
+	bool bGlobal = false;     // setg 写全局层
+	FLeoValue::EKind LitKind = FLeoValue::EKind::Null; // 值为根字面量时的类型提示（非字面量 = Null）
+};
+
+// 整章变量使用收集：名字 → 使用信息（合并进 Out，跨章收割时反复调用）
+void LeoCollectVarUsage(const FLeoProgram& P, std::unordered_map<std::string, FLeoVarUsage>& Out);
+
 } // namespace leo

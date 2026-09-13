@@ -33,4 +33,7 @@ using FLeoVarResolver = std::function<bool(const std::string&, FLeoValue&)>;
 bool LeoEval(const FLeoExprNode& Root, const FLeoVarResolver& Resolver,
              FLeoValue& Out, ELeoDiag& OutErr, std::string& OutMsg);
 
+// 静态分析：收集表达式引用的全部黑板变量名（不去重、按遍历序；编辑器变量收割/拼写检查用）
+void LeoCollectExprReads(const FLeoExprNode& Root, std::vector<std::string>& OutNames);
+
 } // namespace leo

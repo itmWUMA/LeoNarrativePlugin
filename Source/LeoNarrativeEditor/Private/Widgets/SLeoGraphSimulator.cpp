@@ -1,8 +1,12 @@
 #include "Widgets/SLeoGraphSimulator.h"
 
 #include "Data/LeoScenarioGraph.h"
+#include "LeoConditionCodec.h"
+#include "LeoVariableHarvest.h"
 #include "ScriptRuntime/LeoScriptBridge.h"
 
+#include "Styling/CoreStyle.h"
+#include "Widgets/Images/SImage.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SEditableTextBox.h"
 #include "Widgets/Layout/SScrollBox.h"
@@ -22,9 +26,6 @@ void SLeoGraphSimulator::Construct(const FArguments& InArgs)
 	SimCtx = TStrongObjectPtr<ULeoGraphSimContext>(NewObject<ULeoGraphSimContext>(GetTransientPackage()));
 	SimCtx->Global = NewObject<UNarrativeBlackboard>(SimCtx.Get());
 	SimCtx->Local = NewObject<UNarrativeBlackboard>(SimCtx.Get());
-
-	// 预置常用变量行（可改）
-	VarRows.Add(MakeShared<FVarRow>(FVarRow{ TEXT("affection"), TEXT("0") }));
 
 	ChildSlot
 	[
@@ -66,15 +67,19 @@ void SLeoGraphSimulator::Construct(const FArguments& InArgs)
 						SNew(SHorizontalBox)
 						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
 						[
-							SNew(STextBlock).Text(LOCTEXT("VarsHeader", "沙箱变量（全局黑板）"))
+							SNew(STextBlock).Text(LOCTEXT("VarsHeader", "黑板键（脚本与图收割 · 值可编辑）"))
 						]
 						+ SHorizontalBox::Slot().FillWidth(1.f).HAlign(HAlign_Right)
 						[
-							SNew(SButton).Text(LOCTEXT("AddVar", "+ 变量"))
+							SNew(SButton).Text(LOCTEXT("AddVar", "+ 临时键"))
+							.ToolTipText(LOCTEXT("AddVarTip", "收割集之外的变量（如游戏代码写入的），供模拟引用"))
 							.OnClicked_Lambda([this]
 							{
-								VarRows.Add(MakeShared<FVarRow>(FVarRow{ TEXT("var"), TEXT("0") }));
-								BuildVarRows();
+								const TSharedRef<FVarRow> Row = MakeShared<FVarRow>();
+								Row->bUserAdded = true;
+								Row->bGlobal = true;
+								VarRows.Add(Row);
+								RebuildVarWidgets();
 								return FReply::Handled();
 							})
 						]
@@ -116,19 +121,22 @@ void SLeoGraphSimulator::Construct(const FArguments& InArgs)
 			]
 		]
 	];
-	BuildVarRows();
-	ApplyVarsToBoard();
+	SyncRowsWithHarvest();
+	RebuildVarWidgets();
 	Reset();
 }
 
 void SLeoGraphSimulator::NotifyGraphChanged()
 {
+	SyncRowsWithHarvest();
+	RebuildVarWidgets();
 	Reset();
+	RefreshViews();
 }
 
 void SLeoGraphSimulator::Reset()
 {
-	ApplyVarsToBoard();
+	// 黑板值是会话状态：重置只回到入口，不清值（重开编辑器/图变更重建才重置默认值）
 	Stack.Reset();
 	bInsideChapter = false;
 	bDone = false;
@@ -147,25 +155,6 @@ void SLeoGraphSimulator::Reset()
 	Frame.NodeId = Start;
 	Stack.Add(MoveTemp(Frame));
 	RunNode(Start);
-}
-
-void SLeoGraphSimulator::ApplyVarsToBoard()
-{
-	if (!SimCtx || !SimCtx->Global) { return; }
-	TMap<FName, leo::FLeoValue> Vars;
-	for (const TSharedRef<FVarRow>& Row : VarRows)
-	{
-		leo::FLeoDiag D;
-		leo::FLeoExprPtr Expr = LeoBridge::CompileExpr(Row->Expr, D);
-		if (!Expr) { continue; }
-		leo::FLeoValue V;
-		leo::ELeoDiag Code; std::string Msg;
-		if (LeoBridge::EvalExpr(Expr, leo::FLeoVarResolver(), V, Code, Msg))
-		{
-			Vars.Add(FName(*Row->Key), V);
-		}
-	}
-	SimCtx->Global->RestoreFromMap(Vars);
 }
 
 const FLeoScenarioNode* SLeoGraphSimulator::TopNode() const
@@ -352,9 +341,71 @@ void SLeoGraphSimulator::RefreshViews()
 		ResultRows.Add(MakeShared<FString>(TEXT("（转移后显示）")));
 	}
 	if (ResultList.IsValid()) { ResultList->RequestListRefresh(); }
+	RefreshVarCells(); // 边副作用写过黑板 → 值单元格实时回显
 }
 
-void SLeoGraphSimulator::BuildVarRows()
+// ---- 黑板键预览（收割驱动 · 值直连沙箱黑板） ----
+
+namespace
+{
+	leo::FLeoValue DefaultForKind(leo::FLeoValue::EKind Kind)
+	{
+		using EK = leo::FLeoValue::EKind;
+		switch (Kind)
+		{
+		case EK::Bool:   return leo::FLeoValue::MakeBool(false);
+		case EK::Int:    return leo::FLeoValue::MakeInt(0);
+		case EK::Float:  return leo::FLeoValue::MakeFloat(0.0);
+		case EK::String: return leo::FLeoValue::MakeString("");
+		default:         return leo::FLeoValue::MakeInt(0);
+		}
+	}
+}
+
+void SLeoGraphSimulator::SyncRowsWithHarvest()
+{
+	// 收割键 → 行（新键按类型提示落默认值；既有键保留当前值；临时行原样保留）
+	const TMap<FName, FLeoKnownVar>& Vars = FLeoVariableHarvest::Get().GetVars();
+	for (const TPair<FName, FLeoKnownVar>& KV : Vars)
+	{
+		const TSharedRef<FVarRow>* Found = VarRows.FindByPredicate(
+			[&KV](const TSharedRef<FVarRow>& R) { return R->Key == KV.Key; });
+		if (Found) { continue; } // 已有行（含用户早前手动加的同名临时键）：原样接管
+
+		const TSharedRef<FVarRow> Row = MakeShared<FVarRow>();
+		Row->Key = KV.Key;
+		Row->bGlobal = KV.Value.bGlobal;
+		Row->Info = FString::Printf(TEXT("%s%s"), KV.Value.bGlobal ? TEXT("全局") : TEXT("局部"),
+			KV.Value.Kind.IsEmpty() ? TEXT("") : *FString::Printf(TEXT(" · %s"), *KV.Value.Kind));
+		TArray<FString> Tips;
+		Tips.Add(KV.Value.bWritten
+			? TEXT("脚本 set/setg 或图边副作用写入")
+			: TEXT("仅被引用、未见写入（可能由游戏代码定义）"));
+		if (!KV.Value.Source.IsNone()) { Tips.Add(FString::Printf(TEXT("来源: %s"), *KV.Value.Source.ToString())); }
+		Row->Tooltip = FString::Join(Tips, TEXT("\n"));
+
+		// 归属层上若无值则落默认（局部键→局部板，全局键→全局板）
+		UNarrativeBlackboard* Board = Row->bGlobal ? SimCtx->Global.Get() : SimCtx->Local.Get();
+		leo::FLeoValue Existing;
+		if (Board && !Board->GetValue(KV.Key, Existing))
+		{
+			leo::FLeoValue::EKind Kind = leo::FLeoValue::EKind::Null;
+			if (KV.Value.Kind == TEXT("Bool")) { Kind = leo::FLeoValue::EKind::Bool; }
+			else if (KV.Value.Kind == TEXT("Int")) { Kind = leo::FLeoValue::EKind::Int; }
+			else if (KV.Value.Kind == TEXT("Float")) { Kind = leo::FLeoValue::EKind::Float; }
+			else if (KV.Value.Kind == TEXT("String")) { Kind = leo::FLeoValue::EKind::String; }
+			Board->SetValue(KV.Key, DefaultForKind(Kind));
+		}
+		VarRows.Add(Row);
+	}
+	// 按名排序（收割键与临时键混排，稳定观感）
+	VarRows.Sort([](const TSharedRef<FVarRow>& A, const TSharedRef<FVarRow>& B)
+	{
+		return A->Key.LexicalLess(B->Key);
+	});
+}
+
+void SLeoGraphSimulator::RebuildVarWidgets()
 {
 	if (!VarBox.IsValid()) { return; }
 	VarBox->ClearChildren();
@@ -365,34 +416,98 @@ void SLeoGraphSimulator::BuildVarRows()
 		VarBox->AddSlot().AutoHeight().Padding(0, 1)
 		[
 			SNew(SHorizontalBox)
-			+ SHorizontalBox::Slot().FillWidth(0.38f)
+
+			// 键名：收割键只读展示（悬停看类型/来源）；临时键可编辑
+			+ SHorizontalBox::Slot().FillWidth(0.34f).VAlign(VAlign_Center)
 			[
-				SNew(SEditableTextBox)
-				.Text(FText::FromString(Row->Key))
-				.OnTextChanged_Lambda([Row](const FText& T) { Row->Key = T.ToString(); })
+				Row->bUserAdded
+				? static_cast<TSharedRef<SWidget>>(
+					SNew(SEditableTextBox)
+					.HintText(LOCTEXT("KeyNameHint", "键名"))
+					.Text_Lambda([Row]() { return FText::FromName(Row->Key); })
+					.OnTextCommitted_Lambda([Row](const FText& T, ETextCommit::Type)
+					{
+						const FString S = T.ToString().TrimStartAndEnd();
+						Row->Key = S.IsEmpty() ? NAME_None : FName(*S);
+					}))
+				: static_cast<TSharedRef<SWidget>>(
+					SNew(STextBlock)
+					.Text(FText::FromName(Row->Key))
+					.ToolTipText(FText::FromString(Row->Tooltip)))
 			]
-			+ SHorizontalBox::Slot().FillWidth(0.46f).Padding(2, 0)
+
+			// 层/类型灰字（临时键显示"临时·全局"）
+			+ SHorizontalBox::Slot().AutoWidth().Padding(6, 0, 2, 0).VAlign(VAlign_Center)
+			[
+				SNew(STextBlock)
+				.Text_Lambda([Row]()
+				{
+					return FText::FromString(Row->bUserAdded ? TEXT("临时·全局") : Row->Info);
+				})
+				.ColorAndOpacity(FSlateColor::UseSubduedForeground())
+			]
+
+			// 值：直连沙箱黑板（提交即写板；非法输入回显回原值）
+			+ SHorizontalBox::Slot().FillWidth(1.f).Padding(2, 0)
 			[
 				SNew(SEditableTextBox)
-				.Text(FText::FromString(Row->Expr))
-				.HintText(LOCTEXT("ExprHint", ".leo 表达式"))
-				.OnTextChanged_Lambda([Row](const FText& T) { Row->Expr = T.ToString(); })
-				.OnTextCommitted_Lambda([this](const FText&, ETextCommit::Type)
+				.HintText(LOCTEXT("ValueHint", "值（.leo 字面量：3 / 2.5 / true / \"文本\"）"))
+				.Text_Lambda([this, Row]()
 				{
-					ApplyVarsToBoard(); // 提交后重建沙箱黑板（下次转移生效）
+					leo::FLeoValue V;
+					FString Src;
+					return ReadSandboxValue(Row->Key, V) && LeoConditionCodec::ValueToSource(V, Src)
+						? FText::FromString(Src) : FText::GetEmpty();
+				})
+				.OnTextCommitted_Lambda([this, Row](const FText& T, ETextCommit::Type)
+				{
+					WriteSandboxValue(Row, T.ToString());
+					RefreshVarCells();
 				})
 			]
-			+ SHorizontalBox::Slot().AutoWidth()
+
+			// 删行：仅临时键（标准 Button 样式，理由同 SLeoConditionEditor 删行钮）
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
 			[
-				SNew(SButton).Text(FText::FromString(TEXT("×")))
-				.OnClicked_Lambda([this, Idx]
+				SNew(SButton)
+				.Text(LOCTEXT("RemoveTempKey", "删除"))
+				.ButtonStyle(FAppStyle::Get(), "Button")
+				.ContentPadding(FMargin(4, 1))
+				.Visibility_Lambda([Row]() { return Row->bUserAdded ? EVisibility::Visible : EVisibility::Hidden; })
+				.OnClicked_Lambda([this, Row]
 				{
-					if (VarRows.IsValidIndex(Idx)) { VarRows.RemoveAt(Idx); }
-					BuildVarRows();
-					ApplyVarsToBoard();
+					VarRows.RemoveAll([Row](const TSharedRef<FVarRow>& R) { return R == Row; });
+					RebuildVarWidgets();
 					return FReply::Handled();
 				})
 			]
 		];
 	}
 }
+
+bool SLeoGraphSimulator::ReadSandboxValue(FName Key, leo::FLeoValue& Out) const
+{
+	if (Key.IsNone() || !SimCtx) { return false; }
+	if (SimCtx->Local && SimCtx->Local->GetValue(Key, Out)) { return true; } // 读取链同运行时：局部→全局
+	return SimCtx->Global && SimCtx->Global->GetValue(Key, Out);
+}
+
+void SLeoGraphSimulator::WriteSandboxValue(const TSharedRef<FVarRow>& Row, const FString& SourceText)
+{
+	if (Row->Key.IsNone() || !SimCtx) { return; }
+	leo::FLeoDiag D;
+	const leo::FLeoExprPtr Expr = LeoBridge::CompileExpr(SourceText, D);
+	leo::FLeoValue V;
+	leo::ELeoDiag Code; std::string Msg;
+	if (!Expr || !LeoBridge::EvalExpr(Expr, leo::FLeoVarResolver(), V, Code, Msg)) { return; } // 非法：不写板，回显还原
+	UNarrativeBlackboard* Board = Row->bGlobal ? SimCtx->Global.Get() : SimCtx->Local.Get();
+	if (Board) { Board->SetValue(Row->Key, V); }
+}
+
+void SLeoGraphSimulator::RefreshVarCells()
+{
+	// 值单元格不逐帧刷：RefreshViews（转移/重置后）与提交时回显
+	if (!VarBox.IsValid()) { return; }
+	RebuildVarWidgets(); // 行数少，整体重建最简单且顺带刷新灰字
+}
+

@@ -7,6 +7,7 @@ cl /nologo /std:c++17 /utf-8 /EHsc /W3 /I Source\LeoNarrative\Public ^
   tests\host_test.cpp ^
   Source\LeoNarrative\Private\Script\LeoCompiler.cpp ^
   Source\LeoNarrative\Private\Script\LeoExpr.cpp ^
+  Source\LeoNarrative\Private\Script\LeoAnalysis.cpp ^
   Source\LeoNarrative\Private\Script\LeoTypes.cpp ^
   /Fe:tests\host_test.exe /Fo:tests\ >nul
 if errorlevel 1 (

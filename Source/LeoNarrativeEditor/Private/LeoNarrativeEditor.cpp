@@ -5,14 +5,17 @@
 #include "AssetDefinition_LeoScenarioGraph.h"
 #include "LeoDebuggerPanel.h"
 #include "LeoEditorWatcher.h"
+#include "LeoGraphCustomizations.h"
 #include "LeoValidation.h"
 #include "LeoValidationPanel.h"
+#include "LeoVariableHarvest.h"
 
 #include "AssetDefinitionRegistry.h"
 #include "Data/LeoScenarioGraph.h"
 #include "Framework/Docking/TabManager.h"
 #include "Framework/Notifications/NotificationManager.h"
 #include "ToolMenus.h"
+#include "UObject/Package.h"
 #include "Widgets/Notifications/SNotificationList.h"
 
 #define LOCTEXT_NAMESPACE "FLeoNarrativeEditorModule"
@@ -87,10 +90,15 @@ void FLeoNarrativeEditorModule::StartupModule()
 	LeoValidationPanel::RegisterTab();
 	LeoDebuggerPanel::RegisterTab();
 	GWatcher.Start();
+
+	// 变量收割注册表：结构定制（Key 建议 / 条件补全）；过期标记挂在
+	// watcher（脚本变更）与图编辑器 NotifyPostChange（图数据写回）——见 LeoGraphEditorToolkit
+	RegisterLeoGraphCustomizations();
 }
 
 void FLeoNarrativeEditorModule::ShutdownModule()
 {
+	UnregisterLeoGraphCustomizations();
 	GWatcher.Stop();
 	LeoDebuggerPanel::UnregisterTab();
 	LeoValidationPanel::UnregisterTab();

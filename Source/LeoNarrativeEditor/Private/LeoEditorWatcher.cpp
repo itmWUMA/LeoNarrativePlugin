@@ -1,6 +1,7 @@
 #include "LeoEditorWatcher.h"
 
 #include "LeoValidation.h"
+#include "LeoVariableHarvest.h"
 #include "DirectoryWatcherModule.h"
 #include "IDirectoryWatcher.h"
 #include "Framework/Notifications/NotificationManager.h"
@@ -103,4 +104,6 @@ void FLeoEditorWatcher::RecompilePending()
 	PendingFiles.Reset();
 	// 校验面板订阅此通知自动刷新
 	LeoValidation::OnScriptsRevalidated.Broadcast();
+	// 脚本变了 → 变量收割注册表过期（拾取器/补全下次取用时重扫）
+	FLeoVariableHarvest::Get().MarkStale();
 }

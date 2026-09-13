@@ -1,5 +1,6 @@
 #include "LeoGraphEditorToolkit.h"
 
+#include "LeoVariableHarvest.h"
 #include "Widgets/SLeoGraphSimulator.h"
 
 #include "EdGraph/EdGraphNode.h"
@@ -499,6 +500,8 @@ void FLeoGraphEditorToolkit::NotifyPostChange(const FPropertyChangedEvent& Event
 	{
 		RefreshNodeRows();
 		if (Simulator.IsValid()) { Simulator->NotifyGraphChanged(); }
+		// 图数据变了 → 变量收割注册表过期（边条件/副作用可能引用了新变量）
+		FLeoVariableHarvest::Get().MarkStale();
 	}
 	else if (Mirror.IsValid())
 	{
