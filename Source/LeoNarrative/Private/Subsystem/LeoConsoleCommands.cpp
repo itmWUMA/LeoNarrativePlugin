@@ -181,12 +181,27 @@ static FAutoConsoleCommand GLeoLoad(
 	}));
 
 static FAutoConsoleCommand GLeoGraph(
-	TEXT("leo.graph"), TEXT("运行类型化演示编排图: leo.graph demo（Chapter/Branch/Subgraph/Ending 四种节点 + 边副作用，自动播完）"),
+	TEXT("leo.graph"), TEXT("编排图: leo.graph run <图资产软路径>（运行指定图资产）| leo.graph demo（内存演示图，自动播完）"),
 	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
 	{
+		if (Args.Num() >= 2 && Args[0] == TEXT("run"))
+		{
+			ULeoNarrativeSubsystem* S = GetLeoSubsystem();
+			if (!S) { return; }
+			if (ULeoScenarioGraph* Graph = LoadObject<ULeoScenarioGraph>(nullptr, *Args[1]))
+			{
+				UE_LOG(LogTemp, Display, TEXT("[leo.graph] 启动图资产: %s"), *Args[1]);
+				S->StartGraph(Graph);
+			}
+			else
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[leo.graph] 图资产加载失败: %s"), *Args[1]);
+			}
+			return;
+		}
 		if (Args.Num() < 1 || Args[0] != TEXT("demo"))
 		{
-			UE_LOG(LogTemp, Warning, TEXT("用法: leo.graph demo"));
+			UE_LOG(LogTemp, Warning, TEXT("用法: leo.graph run <图资产软路径> | leo.graph demo"));
 			return;
 		}
 		ULeoNarrativeSubsystem* S = GetLeoSubsystem();

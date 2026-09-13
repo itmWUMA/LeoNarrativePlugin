@@ -2,14 +2,22 @@
 
 #include "Widgets/SLeoGraphSimulator.h"
 
+#include "EdGraph/EdGraphNode.h"
 #include "Editor.h"
 #include "Framework/Application/SlateApplication.h"
+#include "Framework/Commands/GenericCommands.h"
+#include "Framework/Commands/UICommandList.h"
 #include "Framework/Docking/TabManager.h"
+#include "Graph/LeoEdGraph.h"
+#include "Graph/LeoEdGraphNodes.h"
+#include "Graph/LeoGraphMirror.h"
+#include "GraphEditor.h"
+#include "ScopedTransaction.h"
 #include "Modules/ModuleManager.h"
 #include "PropertyEditorModule.h"
+#include "SGraphPanel.h"
 #include "Subsystem/LeoNarrativeSubsystem.h"
 #include "Toolkits/IToolkitHost.h"
-#include "Framework/Application/MenuStack.h"
 #include "Widgets/Docking/SDockTab.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SCheckBox.h"
@@ -17,7 +25,6 @@
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SSplitter.h"
 #include "Widgets/Text/STextBlock.h"
-#include "Widgets/Views/SListView.h"
 #include "WorkspaceMenuStructure.h"
 #include "WorkspaceMenuStructureModule.h"
 
@@ -50,7 +57,21 @@ void FLeoGraphEditorToolkit::InitLeoGraphEditor(const EToolkitMode::Type Mode,
 	DetailsView = PEM.CreateDetailView(Args);
 	DetailsView->SetObject(InGraph);
 
-	// v2：单 Tab 宿纳全部编辑器内容（SetHideTabWell 去掉标签头）
+	// 镜像控制器：SGraphEditor 编辑的瞬态 EdGraph + 资产同步
+	Mirror = MakeUnique<FLeoGraphMirror>();
+	Mirror->Init(InGraph);
+	Mirror->OnRebuilt = [this]() { OnMirrorRebuilt(); };
+	Mirror->OnNodeAdded = [this](ULeoEdGraphNode* Node)
+	{
+		if (Node && GraphEditorPtr.IsValid())
+		{
+			GraphEditorPtr->JumpToNode(Node, /*bRequestRename*/false, /*bSelectNode*/true);
+		}
+	};
+
+	BindGraphCommands();
+
+	// 单 Tab 宿纳全部编辑器内容（SetHideTabWell 去掉标签头）
 	const TSharedRef<FTabManager::FLayout> Layout = FTabManager::NewLayout(TEXT("LeoGraphEditorLayout_v2"))
 	->AddArea
 	(
@@ -65,12 +86,12 @@ void FLeoGraphEditorToolkit::InitLeoGraphEditor(const EToolkitMode::Type Mode,
 
 	BeginPIEHandle = FEditorDelegates::BeginPIE.AddRaw(this, &FLeoGraphEditorToolkit::OnBeginPIE);
 	LiveTickHandle = FTSTicker::GetCoreTicker().AddTicker(
-		FTickerDelegate::CreateRaw(this, &FLeoGraphEditorToolkit::TickLiveHighlight), 0.5f);
+		FTickerDelegate::CreateRaw(this, &FLeoGraphEditorToolkit::TickEditor), 0.1f);
 }
 
 FText FLeoGraphEditorToolkit::GetBaseToolkitName() const
 {
-	return LOCTEXT("ToolkitName", "Leo 编排图编辑器");
+	return LOCTEXT("ToolkitName", "叙事编排图编辑器");
 }
 
 void FLeoGraphEditorToolkit::RegisterTabSpawners(const TSharedRef<FTabManager>& InTabManager)
@@ -93,17 +114,52 @@ void FLeoGraphEditorToolkit::UnregisterTabSpawners(const TSharedRef<FTabManager>
 	InTabManager->UnregisterTabSpawner(GGraphTabId);
 }
 
-FName FLeoGraphEditorToolkit::GetSelectedNodeId() const
+// ---- 撤销/重做：资产已被事务系统还原，重建镜像即恢复视图 ----
+
+void FLeoGraphEditorToolkit::PostUndo(bool bSuccess)
 {
-	ULeoScenarioGraph* G = Graph.Get();
-	if (!G || !Selection.IsNode() || !G->Nodes.IsValidIndex(Selection.NodeIndex)) { return NAME_None; }
-	return G->Nodes[Selection.NodeIndex].Id;
+	if (bSuccess && Mirror.IsValid())
+	{
+		Mirror->RebuildFromAsset();
+		SelectedNodeId = NAME_None;
+		SelectedEdgeFromId = NAME_None;
+		SelectedEdgeIndex = INDEX_NONE;
+		RefreshNodeRows();
+		ShowDetailsForSelection();
+		if (Simulator.IsValid()) { Simulator->NotifyGraphChanged(); }
+	}
+}
+
+void FLeoGraphEditorToolkit::PostRedo(bool bSuccess)
+{
+	PostUndo(bSuccess);
 }
 
 // ---- 单 Tab 全量内容 ----
 
+void FLeoGraphEditorToolkit::BindGraphCommands()
+{
+	GraphCommands = MakeShared<FUICommandList>();
+	GraphCommands->MapAction(
+		FGenericCommands::Get().Delete,
+		FExecuteAction::CreateRaw(this, &FLeoGraphEditorToolkit::DeleteSelected),
+		FCanExecuteAction::CreateLambda([this]()
+		{
+			return GraphEditorPtr.IsValid() && GraphEditorPtr->GetSelectedNodes().Num() > 0;
+		}));
+}
+
 TSharedRef<SWidget> FLeoGraphEditorToolkit::MakeGraphTab()
 {
+	SGraphEditor::FGraphEditorEvents Events;
+	Events.OnSelectionChanged = SGraphEditor::FOnSelectionChanged::CreateRaw(this, &FLeoGraphEditorToolkit::OnGraphSelectionChanged);
+	Events.OnNodeDoubleClicked = FSingleNodeEvent::CreateRaw(this, &FLeoGraphEditorToolkit::OnNodeDoubleClicked);
+
+	FGraphAppearanceInfo Appearance;
+	Appearance.InstructionText = LOCTEXT("GraphInstruction",
+		"右键空白添加节点\n从卡片底部引脚拖出连线\n从入口拖线设为起点");
+	Appearance.CornerText = LOCTEXT("CornerText", "叙事编排图");
+
 	return SNew(SVerticalBox)
 		// 顶部工具条
 		+ SVerticalBox::Slot().AutoHeight().Padding(4, 4, 4, 2)
@@ -131,21 +187,8 @@ TSharedRef<SWidget> FLeoGraphEditorToolkit::MakeGraphTab()
 			]
 			+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 2, 0)
 			[
-				SNew(SButton).Text(FText::FromString(TEXT("删除选中")))
-				.OnClicked_Lambda([this] { DeleteSelectedNode(); return FReply::Handled(); })
-			]
-			+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 2, 0)
-			[
-				SNew(SButton).Text(FText::FromString(TEXT("设为入口")))
-				.OnClicked_Lambda([this]
-				{
-					if (ULeoScenarioGraph* G = Graph.Get())
-					{
-						const FName Id = GetSelectedNodeId();
-						if (!Id.IsNone()) { G->Modify(); G->EntryNode = Id; RefreshNodeRows(); }
-					}
-					return FReply::Handled();
-				})
+				SNew(SButton).Text(LOCTEXT("DeleteSelected", "删除选中"))
+				.OnClicked_Lambda([this] { DeleteSelected(); return FReply::Handled(); })
 			]
 			+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 10, 0)
 			[
@@ -163,7 +206,7 @@ TSharedRef<SWidget> FLeoGraphEditorToolkit::MakeGraphTab()
 			]
 			+ SHorizontalBox::Slot().FillWidth(1.f).HAlign(HAlign_Right).VAlign(VAlign_Center)
 			[
-				SNew(STextBlock).Text(FText::FromString(TEXT("中键拖=平移 · 滚轮=缩放 · 右键空白=加节点")))
+				SNew(STextBlock).Text(FText::FromString(TEXT("中键拖=平移 · 滚轮=缩放 · 右键=添加节点 · 点连线中点图标=选边 · Ctrl+Z=撤销")))
 				.ColorAndOpacity(FSlateColor::UseSubduedForeground())
 			]
 		]
@@ -183,54 +226,34 @@ TSharedRef<SWidget> FLeoGraphEditorToolkit::MakeGraphTab()
 					]
 					+ SVerticalBox::Slot().FillHeight(1.f).Padding(2)
 					[
-						SAssignNew(NodeList, SListView<TSharedPtr<FString>>)
+						SAssignNew(NodeList, SListView<TSharedPtr<FLeoNodeRow>>)
 						.ListItemsSource(&NodeRows)
-						.OnGenerateRow_Lambda([](TSharedPtr<FString> Row, const TSharedRef<STableViewBase>& Table)
+						.OnGenerateRow_Lambda([](TSharedPtr<FLeoNodeRow> Row, const TSharedRef<STableViewBase>& Table)
 						{
-							return SNew(STableRow<TSharedPtr<FString>>, Table)
+							return SNew(STableRow<TSharedPtr<FLeoNodeRow>>, Table)
 								.Content()
 								[
-									SNew(STextBlock).Text(FText::FromString(*Row))
+									SNew(STextBlock).Text(FText::FromString(Row->Label))
 								];
 						})
-						.OnSelectionChanged_Lambda([this](TSharedPtr<FString> Row, ESelectInfo::Type)
+						.OnSelectionChanged_Lambda([this](TSharedPtr<FLeoNodeRow> Row, ESelectInfo::Type)
 						{
-							if (!Row.IsValid()) { return; }
-							const int32 Idx = NodeRows.IndexOfByKey(Row);
-							if (Idx != INDEX_NONE) { SelectNode(Idx); }
+							if (!Row.IsValid() || bSyncingListSelection) { return; }
+							SelectNodeById(Row->Id);
 						})
 					]
 				]
 			]
 			+ SSplitter::Slot().Value(0.56f)
 			[
-				SAssignNew(Canvas, SLeoGraphCanvas)
-				.Graph(Graph)
-				.OnSelectionChanged_Lambda([this](const FLeoGraphSelection& Sel) { OnCanvasSelection(Sel); })
-				.OnNodeMoved_Lambda([this](int32, FVector2D)
-				{
-					if (ULeoScenarioGraph* G = Graph.Get()) { G->Modify(); } // 拖动结束标脏
-				})
-				.OnContextMenuRequested_Lambda([this](FVector2D GraphPos, FVector2D ScreenPos)
-				{
-					ShowCanvasContextMenu(GraphPos, ScreenPos);
-				})
-				.OnBackgroundClick_Lambda([this]
-				{
-					Selection = FLeoGraphSelection();
-					if (NodeList.IsValid()) { NodeList->ClearSelection(); }
-					ShowDetailsForSelection();
-				})
-				.OnEdgeSelectionChanged_Lambda([this](int32 FromIdx, int32 EdgeIdx)
-				{
-					OnEdgeSelected(FromIdx, EdgeIdx);
-				})
-				.OnConnectRequested_Lambda([this](int32 FromIdx, int32 ToIdx)
-				{
-					OnConnectRequested(FromIdx, ToIdx);
-				})
-				.OnDeleteEdgeRequested_Lambda([this] { DeleteSelectedEdge(); })
-				.OnDeleteNodeRequested_Lambda([this] { DeleteSelectedNode(); })
+				SAssignNew(GraphEditorPtr, SGraphEditor)
+				.AdditionalCommands(GraphCommands)
+				.IsEditable(true)
+				.GraphToEdit(Mirror.IsValid() ? Mirror->GetEdGraph() : nullptr)
+				.GraphEvents(Events)
+				.AutoExpandActionMenu(true)
+				.Appearance(Appearance)
+				.ShowGraphStateOverlay(false)
 			]
 			+ SSplitter::Slot().Value(0.28f)
 			[
@@ -245,7 +268,7 @@ TSharedRef<SWidget> FLeoGraphEditorToolkit::MakeGraphTab()
 						[
 							SNew(STextBlock).Text_Lambda([this]
 							{
-								return Selection.IsEdge()
+								return !SelectedEdgeFromId.IsNone()
 									? FText::FromString(TEXT("连线（条件/优先级/副作用）"))
 									: FText::FromString(TEXT("详情（编辑后自动写回）"));
 							})
@@ -253,8 +276,18 @@ TSharedRef<SWidget> FLeoGraphEditorToolkit::MakeGraphTab()
 						+ SHorizontalBox::Slot().FillWidth(1.f).HAlign(HAlign_Right)
 						[
 							SNew(SButton).Text(LOCTEXT("DeleteEdge", "删除此连线"))
-							.IsEnabled_Lambda([this] { return Selection.IsEdge(); })
-							.OnClicked_Lambda([this] { DeleteSelectedEdge(); return FReply::Handled(); })
+							.IsEnabled_Lambda([this] { return !SelectedEdgeFromId.IsNone(); })
+							.OnClicked_Lambda([this]
+							{
+								if (Mirror.IsValid())
+								{
+									if (ULeoEdGraphNode_Edge* Edge = Mirror->FindEdge(SelectedEdgeFromId, SelectedEdgeIndex))
+									{
+										Mirror->DeleteEdge(Edge);
+									}
+								}
+								return FReply::Handled();
+							})
 						]
 					]
 					+ SVerticalBox::Slot().FillHeight(1.f).Padding(2)
@@ -275,6 +308,7 @@ TSharedRef<SWidget> FLeoGraphEditorToolkit::MakeGraphTab()
 					SAssignNew(Simulator, SLeoGraphSimulator)
 					.Graph(Graph)
 					.GetSelectedNodeId_Lambda([this]() { return GetSelectedNodeId(); })
+					.OnCurrentNodeChanged_Lambda([this](FName NodeId) { OnSimCurrentNode(NodeId); })
 				]
 			]
 		];
@@ -282,90 +316,202 @@ TSharedRef<SWidget> FLeoGraphEditorToolkit::MakeGraphTab()
 
 // ---- 交互 ----
 
-void FLeoGraphEditorToolkit::OnCanvasSelection(const FLeoGraphSelection& Sel)
+void FLeoGraphEditorToolkit::OnGraphSelectionChanged(const TSet<class UObject*>& NewSelection)
 {
-	Selection = Sel;
-	ShowDetailsForSelection();
-	if (NodeList.IsValid() && Sel.IsNode() && NodeRows.IsValidIndex(Sel.NodeIndex))
+	ULeoEdGraphNode* SelNode = nullptr;
+	ULeoEdGraphNode_Edge* SelEdge = nullptr;
+	for (UObject* Obj : NewSelection)
 	{
-		NodeList->SetSelection(NodeRows[Sel.NodeIndex]);
+		if (ULeoEdGraphNode* N = Cast<ULeoEdGraphNode>(Obj))
+		{
+			if (!SelNode) { SelNode = N; }
+		}
+		else if (ULeoEdGraphNode_Edge* E = Cast<ULeoEdGraphNode_Edge>(Obj))
+		{
+			if (!SelEdge) { SelEdge = E; }
+		}
+	}
+
+	SelectedNodeId = (SelNode && !SelNode->IsA<ULeoEdGraphNode_Entry>()) ? SelNode->NodeId : NAME_None;
+	if (SelEdge)
+	{
+		SelectedEdgeFromId = SelEdge->FromNodeId;
+		SelectedEdgeIndex = SelEdge->EdgeIndex;
+	}
+	else
+	{
+		SelectedEdgeFromId = NAME_None;
+		SelectedEdgeIndex = INDEX_NONE;
+	}
+
+	ShowDetailsForSelection();
+
+	// 列表联动（防回调环）
+	if (NodeList.IsValid())
+	{
+		TSharedPtr<FLeoNodeRow> RowToSelect;
+		for (const TSharedPtr<FLeoNodeRow>& Row : NodeRows)
+		{
+			if (Row->Id == SelectedNodeId) { RowToSelect = Row; break; }
+		}
+		TGuardValue<bool> Guard(bSyncingListSelection, true);
+		NodeList->ClearSelection();
+		if (RowToSelect) { NodeList->SetSelection(RowToSelect); }
 	}
 	if (Simulator.IsValid()) { Simulator->NotifyGraphChanged(); }
 }
 
-void FLeoGraphEditorToolkit::SelectNode(int32 Index)
+void FLeoGraphEditorToolkit::OnNodeDoubleClicked(UEdGraphNode* Node)
 {
-	FLeoGraphSelection Sel;
-	Sel.Kind = FLeoGraphSelection::EKind::Node;
-	Sel.NodeIndex = Index;
-	Selection = Sel;
-	if (Canvas.IsValid()) { Canvas->SetSelection(Sel); }
+	// 双击连线中点图标 / 卡片 → 详情面板刷新（条件/优先级在右侧编辑）
 	ShowDetailsForSelection();
+}
+
+void FLeoGraphEditorToolkit::DeleteSelected()
+{
+	FLeoGraphMirror* M = GetMirror();
+	if (!M || !GraphEditorPtr.IsValid()) { return; }
+	const FGraphPanelSelectionSet& Sel = GraphEditorPtr->GetSelectedNodes();
+	TArray<ULeoEdGraphNode*> Nodes;
+	TArray<ULeoEdGraphNode_Edge*> Edges;
+	for (UObject* Obj : Sel)
+	{
+		if (ULeoEdGraphNode* N = Cast<ULeoEdGraphNode>(Obj))
+		{
+			if (!N->IsA<ULeoEdGraphNode_Entry>()) { Nodes.Add(N); }
+		}
+		else if (ULeoEdGraphNode_Edge* E = Cast<ULeoEdGraphNode_Edge>(Obj))
+		{
+			Edges.Add(E);
+		}
+	}
+	if (Edges.Num() > 0) { M->DeleteEdges(Edges); }
+	if (Nodes.Num() > 0) { M->DeleteNodes(Nodes); }
+}
+
+void FLeoGraphEditorToolkit::SelectNodeById(FName NodeId)
+{
+	if (NodeId.IsNone()) { return; }
+	if (Mirror.IsValid())
+	{
+		if (ULeoEdGraphNode* Ed = Mirror->FindNode(NodeId))
+		{
+			if (GraphEditorPtr.IsValid())
+			{
+				GraphEditorPtr->JumpToNode(Ed, /*bRequestRename*/false, /*bSelectNode*/true);
+			}
+		}
+	}
 }
 
 void FLeoGraphEditorToolkit::ShowDetailsForSelection()
 {
 	ULeoScenarioGraph* G = Graph.Get();
 	if (!G || !DetailsView.IsValid()) { return; }
-	if (Selection.IsNode() && G->Nodes.IsValidIndex(Selection.NodeIndex))
+
+	const FLeoScenarioNode* Node = !SelectedNodeId.IsNone() ? G->FindNode(SelectedNodeId) : nullptr;
+	if (Node)
 	{
 		if (!NodeWrapper.IsValid())
 		{
 			NodeWrapper = TStrongObjectPtr<ULeoNodeEditWrapper>(NewObject<ULeoNodeEditWrapper>(GetTransientPackage()));
 		}
 		NodeWrapper->Owner = G;
-		NodeWrapper->SourceIndex = Selection.NodeIndex;
-		NodeWrapper->Node = G->Nodes[Selection.NodeIndex];
+		NodeWrapper->NodeId = SelectedNodeId;
+		NodeWrapper->Node = *Node;
 		DetailsView->SetObject(NodeWrapper.Get());
+		return;
 	}
-	else
+
+	if (!SelectedEdgeFromId.IsNone())
 	{
-		DetailsView->SetObject(G); // 无选中：编辑图本体（EntryNode 等）
+		const FLeoScenarioNode* FromNode = G->FindNode(SelectedEdgeFromId);
+		if (FromNode && FromNode->Edges.IsValidIndex(SelectedEdgeIndex))
+		{
+			if (!EdgeWrapper.IsValid())
+			{
+				EdgeWrapper = TStrongObjectPtr<ULeoEdgeEditWrapper>(NewObject<ULeoEdgeEditWrapper>(GetTransientPackage()));
+			}
+			EdgeWrapper->Owner = G;
+			EdgeWrapper->FromNodeId = SelectedEdgeFromId;
+			EdgeWrapper->EdgeIndex = SelectedEdgeIndex;
+			EdgeWrapper->Edge = FromNode->Edges[SelectedEdgeIndex];
+			DetailsView->SetObject(EdgeWrapper.Get());
+			return;
+		}
 	}
+
+	DetailsView->SetObject(G); // 无选中：编辑图本体（EntryNode 等）
 }
 
 void FLeoGraphEditorToolkit::NotifyPostChange(const FPropertyChangedEvent& Event, FProperty*)
 {
-	// 节点包装编辑 → 写回资产（连线与坐标由画布交互管理，写回时保留现值防覆盖）
-	if (NodeWrapper.IsValid())
+	ULeoScenarioGraph* G = Graph.Get();
+	if (!G) { return; }
+
+	bool bHandled = false;
+
+	// 节点包装编辑 → 写回（连线与坐标由画布管理，写回时保留现值防覆盖）
+	if (NodeWrapper.IsValid() && NodeWrapper->Owner == G && NodeWrapper->NodeId == SelectedNodeId)
 	{
-		if (ULeoScenarioGraph* G = NodeWrapper->Owner)
+		for (FLeoScenarioNode& AssetNode : G->Nodes)
 		{
-			if (G->Nodes.IsValidIndex(NodeWrapper->SourceIndex))
+			if (AssetNode.Id == NodeWrapper->NodeId)
 			{
+				FScopedTransaction Transaction(LOCTEXT("EditNodeTx", "编辑节点属性"));
 				G->Modify();
 				FLeoScenarioNode NewNode = NodeWrapper->Node;
-				NewNode.Edges = G->Nodes[NodeWrapper->SourceIndex].Edges;
-				NewNode.EditorPos = G->Nodes[NodeWrapper->SourceIndex].EditorPos;
-				G->Nodes[NodeWrapper->SourceIndex] = NewNode;
+				NewNode.Edges = AssetNode.Edges;
+				NewNode.EditorPos = AssetNode.EditorPos;
+				AssetNode = NewNode;
 				G->PostEditChange();
+				bHandled = true;
+				if (Mirror.IsValid()) { Mirror->RefreshNodeVisual(AssetNode.Id); }
+				break;
 			}
 		}
 	}
+
 	// 连线包装编辑 → 写回
-	if (EdgeWrapper.IsValid())
+	if (EdgeWrapper.IsValid() && EdgeWrapper->Owner == G
+		&& EdgeWrapper->FromNodeId == SelectedEdgeFromId && EdgeWrapper->EdgeIndex == SelectedEdgeIndex
+		&& !SelectedEdgeFromId.IsNone())
 	{
-		if (ULeoScenarioGraph* G = EdgeWrapper->Owner)
+		const FLeoScenarioNode* FromNode = G->FindNode(EdgeWrapper->FromNodeId);
+		if (FromNode && FromNode->Edges.IsValidIndex(EdgeWrapper->EdgeIndex))
 		{
-			if (G->Nodes.IsValidIndex(EdgeWrapper->NodeIndex)
-				&& G->Nodes[EdgeWrapper->NodeIndex].Edges.IsValidIndex(EdgeWrapper->EdgeIndex))
+			FScopedTransaction Transaction(LOCTEXT("EditEdgeTx", "编辑连线属性"));
+			G->Modify();
+			for (FLeoScenarioNode& AssetNode : G->Nodes)
 			{
-				G->Modify();
-				G->Nodes[EdgeWrapper->NodeIndex].Edges[EdgeWrapper->EdgeIndex] = EdgeWrapper->Edge;
-				G->PostEditChange();
+				if (AssetNode.Id == EdgeWrapper->FromNodeId)
+				{
+					AssetNode.Edges[EdgeWrapper->EdgeIndex] = EdgeWrapper->Edge;
+					break;
+				}
 			}
+			G->PostEditChange();
+			bHandled = true;
 		}
 	}
-	RefreshNodeRows();
-	if (Canvas.IsValid()) { Canvas->RefreshVisuals(); }
-	if (Simulator.IsValid()) { Simulator->NotifyGraphChanged(); }
+
+	if (bHandled)
+	{
+		RefreshNodeRows();
+		if (Simulator.IsValid()) { Simulator->NotifyGraphChanged(); }
+	}
+	else if (Mirror.IsValid())
+	{
+		// 图本体编辑（EntryNode 等）→ 重建镜像（入口连线跟随）
+		Mirror->RebuildFromAsset();
+	}
 }
 
 FVector2D FLeoGraphEditorToolkit::FindFreePosition() const
 {
 	// 网格级联：行优先扫描第一个不与任何节点（含边距）重叠的 32px 网格位
 	const ULeoScenarioGraph* G = Graph.Get();
-	const FVector2D Size = LeoGraphCanvasConst::GetNodeSize();
+	const FVector2D Size(190.f, 70.f); // 卡片估计尺寸（实际尺寸自适应内容）
 	const float Margin = 24.f;
 	for (float Y = 64.f; Y < 4096.f; Y += 32.f)
 	{
@@ -389,163 +535,23 @@ FVector2D FLeoGraphEditorToolkit::FindFreePosition() const
 
 void FLeoGraphEditorToolkit::AddNode(ELeoScenarioNodeType Type)
 {
-	AddNodeAt(Type, FindFreePosition());
-}
-
-void FLeoGraphEditorToolkit::AddNodeAt(ELeoScenarioNodeType Type, FVector2D Pos)
-{
-	ULeoScenarioGraph* G = Graph.Get();
-	if (!G) { return; }
-	G->Modify();
-	FLeoScenarioNode N;
-	N.Type = Type;
-	static int32 Counter = 0;
-	N.Id = *FString::Printf(TEXT("node_%d"), ++Counter);
-	N.EditorPos = FVector2D(FMath::GridSnap(Pos.X, 16.f), FMath::GridSnap(Pos.Y, 16.f));
-	N.EditorPos = FVector2D(FMath::Max(0.f, N.EditorPos.X), FMath::Max(0.f, N.EditorPos.Y));
-	const int32 NewIndex = G->Nodes.Add(N);
-	if (G->EntryNode.IsNone()) { G->EntryNode = N.Id; }
-	RefreshAll();
-	SelectNode(NewIndex);
-}
-
-void FLeoGraphEditorToolkit::OnConnectRequested(int32 FromIdx, int32 ToIdx)
-{
-	// 画布拖拽建边：无条件/优先级 0，条件在选中连线后的详情里编
-	ULeoScenarioGraph* G = Graph.Get();
-	if (!G || !G->Nodes.IsValidIndex(FromIdx) || !G->Nodes.IsValidIndex(ToIdx) || FromIdx == ToIdx) { return; }
-	G->Modify();
-	FLeoScenarioEdge E;
-	E.To = G->Nodes[ToIdx].Id;
-	G->Nodes[FromIdx].Edges.Add(E);
-	if (Canvas.IsValid()) { Canvas->RefreshVisuals(); }
-	if (Simulator.IsValid()) { Simulator->NotifyGraphChanged(); }
-}
-
-void FLeoGraphEditorToolkit::OnEdgeSelected(int32 FromIdx, int32 EdgeIdx)
-{
-	ULeoScenarioGraph* G = Graph.Get();
-	if (!G || !G->Nodes.IsValidIndex(FromIdx) || !G->Nodes[FromIdx].Edges.IsValidIndex(EdgeIdx)) { return; }
-	FLeoGraphSelection Sel;
-	Sel.Kind = FLeoGraphSelection::EKind::Edge;
-	Sel.NodeIndex = FromIdx;
-	Sel.EdgeIndex = EdgeIdx;
-	Selection = Sel;
-	if (Canvas.IsValid()) { Canvas->SetSelection(Sel); }
-	if (NodeList.IsValid()) { NodeList->ClearSelection(); }
-
-	if (!EdgeWrapper.IsValid())
+	if (Mirror.IsValid())
 	{
-		EdgeWrapper = TStrongObjectPtr<ULeoEdgeEditWrapper>(NewObject<ULeoEdgeEditWrapper>(GetTransientPackage()));
+		Mirror->AddNode(Type, FindFreePosition());
 	}
-	EdgeWrapper->Owner = G;
-	EdgeWrapper->NodeIndex = FromIdx;
-	EdgeWrapper->EdgeIndex = EdgeIdx;
-	EdgeWrapper->Edge = G->Nodes[FromIdx].Edges[EdgeIdx];
-	if (DetailsView.IsValid()) { DetailsView->SetObject(EdgeWrapper.Get()); }
-	if (Simulator.IsValid()) { Simulator->NotifyGraphChanged(); }
-}
-
-void FLeoGraphEditorToolkit::DeleteSelectedEdge()
-{
-	ULeoScenarioGraph* G = Graph.Get();
-	if (!G || !Selection.IsEdge() || !G->Nodes.IsValidIndex(Selection.NodeIndex)) { return; }
-	G->Modify();
-	G->Nodes[Selection.NodeIndex].Edges.RemoveAt(Selection.EdgeIndex);
-	Selection = FLeoGraphSelection();
-	if (Canvas.IsValid()) { Canvas->RefreshVisuals(); Canvas->SetSelection(Selection); }
-	ShowDetailsForSelection();
-	if (Simulator.IsValid()) { Simulator->NotifyGraphChanged(); }
-}
-
-void FLeoGraphEditorToolkit::ShowCanvasContextMenu(FVector2D GraphPos, FVector2D ScreenPos)
-{
-	if (!Canvas.IsValid()) { return; }
-	TSharedRef<SVerticalBox> Menu = SNew(SVerticalBox);
-	const auto AddItem = [&Menu, this, GraphPos](const TCHAR* Label, ELeoScenarioNodeType Type)
-	{
-		Menu->AddSlot().AutoHeight().Padding(2)
-		[
-			SNew(SButton)
-			.Text(FText::FromString(Label))
-			.OnClicked_Lambda([this, Type, GraphPos]
-			{
-				AddNodeAt(Type, GraphPos);
-				return FReply::Handled();
-			})
-		];
-	};
-	AddItem(TEXT("加 章节节点"), ELeoScenarioNodeType::Chapter);
-	AddItem(TEXT("加 分流节点"), ELeoScenarioNodeType::Branch);
-	AddItem(TEXT("加 结局节点"), ELeoScenarioNodeType::Ending);
-	AddItem(TEXT("加 子图节点"), ELeoScenarioNodeType::Subgraph);
-
-	FSlateApplication::Get().PushMenu(
-		Canvas.ToSharedRef(),
-		FWidgetPath(),
-		SNew(SBorder)
-		.BorderImage(FAppStyle::GetBrush("Menu.Background"))
-		.Padding(4)
-		[
-			Menu
-		],
-		ScreenPos,
-		FPopupTransitionEffect(FPopupTransitionEffect::ContextMenu)); // 5.8：枚举内嵌于 FPopupTransitionEffect
-}
-
-void FLeoGraphEditorToolkit::DeleteSelectedNode()
-{
-	ULeoScenarioGraph* G = Graph.Get();
-	if (!G || !Selection.IsNode() || !G->Nodes.IsValidIndex(Selection.NodeIndex)) { return; }
-	G->Modify();
-	const FName RemovedId = G->Nodes[Selection.NodeIndex].Id;
-	G->Nodes.RemoveAt(Selection.NodeIndex);
-	for (FLeoScenarioNode& N : G->Nodes) // 清理指向被删节点的悬空边
-	{
-		N.Edges.RemoveAll([RemovedId](const FLeoScenarioEdge& E) { return E.To == RemovedId; });
-	}
-	if (G->EntryNode == RemovedId)
-	{
-		G->EntryNode = G->Nodes.Num() > 0 ? G->Nodes[0].Id : NAME_None;
-	}
-	Selection = FLeoGraphSelection();
-	RefreshAll();
 }
 
 void FLeoGraphEditorToolkit::AutoLayout()
 {
-	ULeoScenarioGraph* G = Graph.Get();
-	if (!G || G->Nodes.Num() == 0) { return; }
-	G->Modify();
-	// 入口 BFS 分层；层距=节点宽+96，同层纵向堆叠行距=节点高+48
-	TMap<FName, int32> Level;
-	Level.Add(G->EntryNode, 0);
-	TArray<FName> Queue = { G->EntryNode };
-	while (!Queue.IsEmpty())
+	if (!Mirror.IsValid()) { return; }
+	Mirror->ApplyAutoLayout();
+	if (GraphEditorPtr.IsValid())
 	{
-		const FName Cur = Queue.Pop();
-		const FLeoScenarioNode* N = G->FindNode(Cur);
-		if (!N) { continue; }
-		for (const FLeoScenarioEdge& E : N->Edges)
+		if (SGraphPanel* Panel = GraphEditorPtr->GetGraphPanel())
 		{
-			if (!Level.Contains(E.To))
-			{
-				Level.Add(E.To, Level[Cur] + 1);
-				Queue.Add(E.To);
-			}
+			Panel->ZoomToFit(/*bOnlySelection*/false);
 		}
 	}
-	TMap<int32, int32> Column;
-	for (FLeoScenarioNode& N : G->Nodes)
-	{
-		const int32 L = Level.Contains(N.Id) ? Level[N.Id] : 0;
-		const int32 C = Column.Contains(L) ? Column[L] + 1 : 0;
-		Column.Add(L, C);
-		const FVector2D Size = LeoGraphCanvasConst::GetNodeSize();
-		N.EditorPos = FVector2D(64.f + L * (Size.X + 96.f), 64.f + C * (Size.Y + 48.f));
-	}
-	if (Canvas.IsValid()) { Canvas->RefreshVisuals(); }
-	RefreshNodeRows();
 }
 
 void FLeoGraphEditorToolkit::RefreshNodeRows()
@@ -554,11 +560,12 @@ void FLeoGraphEditorToolkit::RefreshNodeRows()
 	NodeRows.Reset();
 	if (G)
 	{
-		for (int32 i = 0; i < G->Nodes.Num(); ++i)
+		for (const FLeoScenarioNode& N : G->Nodes)
 		{
-			NodeRows.Add(MakeShared<FString>(FString::Printf(TEXT("%d. %s%s"),
-				i, *G->Nodes[i].Id.ToString(),
-				G->Nodes[i].Id == G->EntryNode ? TEXT("  ◀入口") : TEXT(""))));
+			const FString Label = FString::Printf(TEXT("%s%s"),
+				*N.Id.ToString(),
+				N.Id == G->EntryNode ? TEXT("  ◀入口") : TEXT(""));
+			NodeRows.Add(MakeShared<FLeoNodeRow>(FLeoNodeRow{ N.Id, Label }));
 		}
 	}
 	if (NodeList.IsValid()) { NodeList->RequestListRefresh(); }
@@ -567,12 +574,28 @@ void FLeoGraphEditorToolkit::RefreshNodeRows()
 void FLeoGraphEditorToolkit::RefreshAll()
 {
 	RefreshNodeRows();
-	if (Canvas.IsValid()) { Canvas->RebuildNodes(); }
+	ShowDetailsForSelection();
+	if (Mirror.IsValid()) { Mirror->RebuildFromAsset(); }
+}
+
+void FLeoGraphEditorToolkit::OnMirrorRebuilt()
+{
+	RefreshNodeRows();
+	// 选中失效则清（结构删除后）
+	if (!SelectedNodeId.IsNone() && (!Mirror.IsValid() || !Mirror->FindNode(SelectedNodeId)))
+	{
+		SelectedNodeId = NAME_None;
+	}
+	if (!SelectedEdgeFromId.IsNone() && (!Mirror.IsValid() || !Mirror->FindEdge(SelectedEdgeFromId, SelectedEdgeIndex)))
+	{
+		SelectedEdgeFromId = NAME_None;
+		SelectedEdgeIndex = INDEX_NONE;
+	}
 	ShowDetailsForSelection();
 	if (Simulator.IsValid()) { Simulator->NotifyGraphChanged(); }
 }
 
-// ---- PIE 联动 ----
+// ---- PIE/干跑联动 ----
 
 void FLeoGraphEditorToolkit::OnBeginPIE(bool bIsSimulating)
 {
@@ -593,23 +616,48 @@ void FLeoGraphEditorToolkit::OnBeginPIE(bool bIsSimulating)
 	}
 }
 
-bool FLeoGraphEditorToolkit::TickLiveHighlight(float)
+bool FLeoGraphEditorToolkit::TickEditor(float)
 {
-	if (!Canvas.IsValid() || !GEngine) { return true; }
-	FName LiveNode;
-	for (const FWorldContext& Ctx : GEngine->GetWorldContexts())
+	// 拖拽结束后的位置提交（Mirror 内部去抖，一次拖拽一个事务）
+	if (Mirror.IsValid())
 	{
-		if (Ctx.OwningGameInstance && Ctx.WorldType == EWorldType::PIE)
+		Mirror->TickSyncPositions();
+	}
+
+	// PIE 运行高亮（激活时优先于干跑高亮）
+	FName LiveNode;
+	bool bPieGraphActive = false;
+	if (GEngine)
+	{
+		for (const FWorldContext& Ctx : GEngine->GetWorldContexts())
 		{
-			if (ULeoNarrativeSubsystem* Leo = Ctx.OwningGameInstance->GetSubsystem<ULeoNarrativeSubsystem>())
+			if (Ctx.OwningGameInstance && Ctx.WorldType == EWorldType::PIE)
 			{
-				if (Leo->IsGraphActive()) { LiveNode = Leo->GetCurrentGraphNode(); }
+				if (ULeoNarrativeSubsystem* Leo = Ctx.OwningGameInstance->GetSubsystem<ULeoNarrativeSubsystem>())
+				{
+					if (Leo->IsGraphActive())
+					{
+						LiveNode = Leo->GetCurrentGraphNode();
+						bPieGraphActive = true;
+					}
+				}
+				break;
 			}
-			break;
 		}
 	}
-	Canvas->SetLiveNode(LiveNode);
+	if (bPieGraphActive && Mirror.IsValid())
+	{
+		Mirror->SetActiveNode(LiveNode);
+	}
 	return true;
+}
+
+void FLeoGraphEditorToolkit::OnSimCurrentNode(FName NodeId)
+{
+	if (Mirror.IsValid())
+	{
+		Mirror->SetActiveNode(NodeId);
+	}
 }
 
 #undef LOCTEXT_NAMESPACE

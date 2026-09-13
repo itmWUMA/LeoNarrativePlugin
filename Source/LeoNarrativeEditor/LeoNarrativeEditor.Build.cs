@@ -34,6 +34,8 @@ public class LeoNarrativeEditor : ModuleRules
 			"WorkspaceMenuStructure", // P0/P1: Nomad Tab 分组（Tools）
 			"PropertyEditor",   // T2: 图编辑器 Details 面板
 			"AssetDefinition",  // T2: UAssetDefinition（Gameplay→Narrative 子菜单入口）
+			"GraphEditor",      // T2: SGraphEditor/SGraphNode/FConnectionDrawingPolicy（画布 1:1 复刻 BT 卡片 + 状态机连线）
+			"EditorFramework",  // T2: FGenericCommands（图面板 Delete 命令）
 		}
 		);
 	}

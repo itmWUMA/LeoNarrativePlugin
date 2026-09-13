@@ -9,7 +9,7 @@
 
 FText UAssetDefinition_LeoScenarioGraph::GetAssetDisplayName() const
 {
-	return LOCTEXT("AssetName", "Leo 编排图");
+	return LOCTEXT("AssetName", "叙事编排图");
 }
 
 FLinearColor UAssetDefinition_LeoScenarioGraph::GetAssetColor() const

@@ -65,9 +65,9 @@ struct FLeoScenarioNode
 	UPROPERTY(EditAnywhere, meta = (EditConditionHide, EditCondition = "Type == ELeoScenarioNodeType::Subgraph"))
 	TObjectPtr<ULeoScenarioGraph> SubGraph; // 子图资产（收束后回到本节点出边）
 	// 连线由画布交互编辑（拖拽建边/点击选边），坐标由拖动管理——Details 不再展示
-	UPROPERTY(EditAnywhere, meta = (EditConditionHide, EditCondition = "false"))
+	UPROPERTY()
 	TArray<FLeoScenarioEdge> Edges;
-	UPROPERTY(EditAnywhere, meta = (EditConditionHide, EditCondition = "false"))
+	UPROPERTY()
 	FVector2D EditorPos = FVector2D(80, 60);
 };
 

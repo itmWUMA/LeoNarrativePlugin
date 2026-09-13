@@ -18,6 +18,7 @@ void SLeoGraphSimulator::Construct(const FArguments& InArgs)
 {
 	Graph = InArgs._Graph;
 	GetSelectedNodeId = InArgs._GetSelectedNodeId;
+	OnCurrentNodeEvent = InArgs._OnCurrentNodeChanged;
 	SimCtx = TStrongObjectPtr<ULeoGraphSimContext>(NewObject<ULeoGraphSimContext>(GetTransientPackage()));
 	SimCtx->Global = NewObject<UNarrativeBlackboard>(SimCtx.Get());
 	SimCtx->Local = NewObject<UNarrativeBlackboard>(SimCtx.Get());
@@ -202,6 +203,9 @@ void SLeoGraphSimulator::RunNode(FName NodeId)
 	}
 	Stack.Last().NodeId = NodeId;
 
+	// 干跑高亮上报：仅顶层图的节点可上画布（子图内节点 → NAME_None 清除）
+	NotifyCurrentNode(Stack.Last().Graph.Get() == Graph.Get() ? NodeId : NAME_None);
+
 	switch (N->Type)
 	{
 	case ELeoScenarioNodeType::Chapter:
@@ -311,6 +315,15 @@ void SLeoGraphSimulator::Finish(FName EndingId)
 {
 	bDone = true;
 	LastEnding = EndingId;
+	NotifyCurrentNode(NAME_None);
+}
+
+void SLeoGraphSimulator::NotifyCurrentNode(FName NodeId)
+{
+	if (OnCurrentNodeEvent.IsBound())
+	{
+		OnCurrentNodeEvent.Execute(NodeId);
+	}
 }
 
 FText SLeoGraphSimulator::BuildStatusText() const

@@ -13,6 +13,7 @@ class ULeoScenarioGraph;
 class SEditableTextBox;
 
 DECLARE_DELEGATE_RetVal(FName, FLeoSimGetSelectedNode);
+DECLARE_DELEGATE_OneParam(FLeoSimCurrentNodeEvent, FName /*当前节点Id；NAME_None=不在本图/已完结*/);
 
 // 沙箱黑板宿主（防 GC）
 UCLASS()
@@ -32,6 +33,7 @@ public:
 	SLATE_BEGIN_ARGS(SLeoGraphSimulator) {}
 		SLATE_ARGUMENT(TWeakObjectPtr<ULeoScenarioGraph>, Graph)
 		SLATE_EVENT(FLeoSimGetSelectedNode, GetSelectedNodeId)
+		SLATE_EVENT(FLeoSimCurrentNodeEvent, OnCurrentNodeChanged) // 干跑当前节点 → 画布高亮
 	SLATE_END_ARGS()
 
 	void Construct(const FArguments& InArgs);
@@ -55,6 +57,7 @@ private:
 	void Finish(FName EndingId);
 	void ApplyVarsToBoard();
 	void RefreshViews();
+	void NotifyCurrentNode(FName NodeId); // 画布高亮上报（子图内节点上报 NAME_None）
 
 	FText BuildStatusText() const;
 	FString DescribeNode(const FLeoScenarioNode& N) const;
@@ -62,6 +65,7 @@ private:
 
 	TWeakObjectPtr<ULeoScenarioGraph> Graph;
 	FLeoSimGetSelectedNode GetSelectedNodeId;
+	FLeoSimCurrentNodeEvent OnCurrentNodeEvent;
 	TStrongObjectPtr<ULeoGraphSimContext> SimCtx;
 	LeoGraphEval::FExprCache ExprCache;
 
