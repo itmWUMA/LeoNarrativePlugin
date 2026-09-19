@@ -56,4 +56,28 @@ namespace LeoBridge
 		leo::FLeoValue::EKind LitKind = leo::FLeoValue::EKind::Null; // 根字面量类型提示
 	};
 	LEONARRATIVE_API void CollectProgramVarUsage(const leo::FLeoProgram& P, TArray<FLeoVarUsageInfo>& Out);
+
+	// ---- 表现资产引用收集（清单类别核对 / 章节预载用）----
+	// 类别 = 不透明 token（FName；内置 "bgm"/"se"/"voice"/"bg"/"char"，框架命令如 "seq"，
+	// 项目自定义命令可带任意 token）——类别的语义由清单侧类别声明决定，集合可扩展
+
+	// 自定义命令的资产参数声明（对应内核 leo::FLeoCustomAssetArg）
+	struct FLeoCustomAssetArgInfo
+	{
+		FString Cmd;
+		int32 ArgIndex = 0;
+		FName Kind;
+	};
+
+	// 一次资产引用（首个使用行号用于诊断定位）
+	struct FLeoAssetRefInfo
+	{
+		FName Kind;
+		FString Id;
+		int32 Line = 0;
+	};
+
+	// 整章资产引用：bgm/se/voice/bg/char 直接引用 + CustomAssetArgs 声明的参数位（如 seq）
+	LEONARRATIVE_API void CollectProgramAssetRefs(const leo::FLeoProgram& P,
+		const TArray<FLeoCustomAssetArgInfo>& CustomAssetArgs, TArray<FLeoAssetRefInfo>& Out);
 }

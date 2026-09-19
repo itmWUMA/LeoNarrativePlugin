@@ -98,4 +98,32 @@ struct FLeoVarUsage
 // 整章变量使用收集：名字 → 使用信息（合并进 Out，跨章收割时反复调用）
 void LeoCollectVarUsage(const FLeoProgram& P, std::unordered_map<std::string, FLeoVarUsage>& Out);
 
+// ---- 表现资产引用收集（清单类别核对 / 章节预载共用的静态分析）----
+// 类别 = 不透明 token 字符串（内置命令产出 "bgm"/"se"/"voice"/"bg"/"char"，
+// 自定义命令由声明表传入如 "seq"、项目自定义如 "video"）。内核只收集归类，
+// 类别的语义（期望资产类等）由 UE 侧的类别声明决定——类别集合因此可扩展而内核不感知。
+
+// 自定义命令的资产参数声明：第 ArgIndex 个位置参数是逻辑名、属于哪类。
+// seq 等框架预注册命令对内核是普通自定义命令，声明由 UE 侧传入（内核零硬编码）。
+struct FLeoCustomAssetArg
+{
+	std::string Cmd;
+	int ArgIndex = 0;
+	std::string Kind; // 类别 token，如 "seq"
+};
+
+// 一次资产引用（首个使用位置用于诊断定位）
+struct FLeoAssetRef
+{
+	std::string Kind; // 类别 token
+	std::string Id;
+	int Line = 0;
+};
+
+// 整章资产引用收集：bgm/se/voice/bg/char 直接引用（内置 token）+ 自定义命令声明的参数位；
+// "-"（移除/停止）与空名不算引用。合并进 Out（Id → 首次引用；同类重复保留首行，
+// 同名跨类冲突保留首个类别——跨类属于编写问题，由清单校验报错）。
+void LeoCollectAssetRefs(const FLeoProgram& P, const std::vector<FLeoCustomAssetArg>& CustomAssetArgs,
+	std::unordered_map<std::string, FLeoAssetRef>& Out);
+
 } // namespace leo

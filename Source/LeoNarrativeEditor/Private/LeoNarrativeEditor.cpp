@@ -2,6 +2,7 @@
 
 #include "LeoNarrativeEditor.h"
 
+#include "AssetDefinition_LeoAssetManifest.h"
 #include "AssetDefinition_LeoScenarioGraph.h"
 #include "LeoDebuggerPanel.h"
 #include "LeoEditorWatcher.h"
@@ -11,6 +12,7 @@
 #include "LeoVariableHarvest.h"
 
 #include "AssetDefinitionRegistry.h"
+#include "Data/LeoAssetManifest.h"
 #include "Data/LeoScenarioGraph.h"
 #include "Framework/Docking/TabManager.h"
 #include "Framework/Notifications/NotificationManager.h"
@@ -78,6 +80,12 @@ void FLeoNarrativeEditorModule::StartupModule()
 		{
 			DefRegistry->RegisterAssetDefinition(
 				CastChecked<UAssetDefinition>(UAssetDefinition_LeoScenarioGraph::StaticClass()->GetDefaultObject()));
+		}
+		// M10: ULeoAssetManifest 同一入口（Gameplay → Narrative），双击打开专属清单编辑器
+		if (DefRegistry->GetAssetDefinitionForClass(ULeoAssetManifest::StaticClass()) == nullptr)
+		{
+			DefRegistry->RegisterAssetDefinition(
+				CastChecked<UAssetDefinition>(UAssetDefinition_LeoAssetManifest::StaticClass()->GetDefaultObject()));
 		}
 		UE_LOG(LogTemp, Display, TEXT("[Leo] 资产定义注册%s（注册表共 %d 个定义）"),
 			bRegistered ? TEXT("正常") : TEXT("兜底补注册"), DefRegistry->GetAllAssetDefinitions().Num());

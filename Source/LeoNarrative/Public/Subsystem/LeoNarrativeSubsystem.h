@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Containers/Ticker.h"
 #include "Blackboard/NarrativeBlackboard.h"
+#include "Data/LeoAssetStreamer.h"
 #include "Data/LeoGraphEval.h"
 #include "L10n/LeoLocalization.h"
 #include "ScriptRuntime/LeoScriptRegistry.h"
@@ -97,6 +98,21 @@ public:
 	void SetManifest(ULeoAssetManifest* InManifest);
 	ULeoAssetManifest* GetManifest() const { return Manifest; }
 
+	// ---- 章节资产预载（转场窗口调用）----
+	// PreloadChapter：静态分析收割本章全部表现资产逻辑名（bgm/se/voice/bg/char/seq）
+	// → 清单分表解析 → StreamableManager 异步批量加载；句柄存活期间资产常驻，
+	// 使用点（ResolveObject/TryLoad）直接命中内存，零同步加载卡顿。
+	// 与 StartChapter 相互独立，典型时序 = 转场遮罩下预载 → 完成后开章。
+	bool PreloadChapter(FName Chapter);
+	bool IsPreloadComplete() const { return !Streamer.IsLoadInProgress(); }
+	void ReleasePreloadedAssets() { Streamer.ReleaseHandle(); } // 切章/低内存时主动释放
+	int32 GetPreloadAssetCount() const { return Streamer.GetResolvedCount(); }
+	const TArray<FName>& GetPreloadMissedIds() const { return Streamer.GetMissedIds(); }
+
+	// 预载完成（游戏线程；此时本章资产可零加载使用）
+	DECLARE_MULTICAST_DELEGATE(FLeoOnPreloadComplete);
+	FLeoOnPreloadComplete OnPreloadComplete;
+
 	// 对话 UI 开关（纯 C++ Slate，无需编辑器资产）
 	void ShowDialogueUI(bool bShow);
 
@@ -171,6 +187,7 @@ private:
 	TObjectPtr<ULeoDialogueWidget> DialogueWidget;
 	UPROPERTY()
 	TObjectPtr<ULeoAssetManifest> Manifest;
+	FLeoAssetStreamer Streamer;                  // 章节资产预载句柄（非反射）
 
 	UPROPERTY()
 	TArray<FLeoGraphFrame> GraphStack;

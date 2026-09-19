@@ -5,6 +5,7 @@
 #include "LeoConditionCodec.h"
 #include "LeoL10nToolkit.h"
 #include "ScriptRuntime/LeoScriptBridge.h"
+#include "Stage/LeoSequencerPerformer.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
 #include "Interfaces/IPluginManager.h"
@@ -99,55 +100,41 @@ namespace
 
 	// ---- 资产引用核对 ----
 
-	// 一个逻辑名的全部使用点（首个位置用于报错定位）
+	// 一个逻辑名的全部使用点（首个位置用于报错定位；类别 = 首次使用的命令类别 token）
 	struct FLeoAssetUsage
 	{
 		FString FirstFile;
 		int32 FirstLine = 0;
-		bool bWantsSound = false; // bgm/se/voice → USoundBase
-		bool bWantsSequence = false; // seq → ULevelSequence
+		FName Kind;
 	};
 
-	// 从编译产物提取资源引用（只扫工程剧本；golden 语料用的是假名，不参与）
+	// 从编译产物提取资源引用（内核收集器，seq 等框架命令的参数声明由 Performer 单源提供；
+	// 只扫工程剧本；golden 语料用的是假名，不参与）
 	void CollectAssetUsages(const leo::FLeoProgram& Program, const FString& Path,
 		TMap<FName, FLeoAssetUsage>& Out)
 	{
-		for (const leo::FLeoCommand& C : Program.Commands)
+		TArray<LeoBridge::FLeoCustomAssetArgInfo> FrameworkArgs;
+		ULeoSequencerPerformer::GetFrameworkAssetArgs(FrameworkArgs);
+		TArray<LeoBridge::FLeoAssetRefInfo> Refs;
+		LeoBridge::CollectProgramAssetRefs(Program, FrameworkArgs, Refs);
+		const FString File = FPaths::GetCleanFilename(Path);
+		for (const LeoBridge::FLeoAssetRefInfo& R : Refs)
 		{
-			FName LogicalId;
-			FLeoAssetUsage Usage;
-			Usage.FirstFile = FPaths::GetCleanFilename(Path);
-			Usage.FirstLine = C.Line;
-			switch (C.Kind)
+			FLeoAssetUsage& U = Out.FindOrAdd(FName(*R.Id));
+			if (U.FirstFile.IsEmpty())
 			{
-			case leo::ELeoCmd::Bgm:
-			case leo::ELeoCmd::Se:
-			case leo::ELeoCmd::Voice:
-				LogicalId = FName(C.AssetId.c_str());
-				Usage.bWantsSound = true;
-				break;
-			case leo::ELeoCmd::Bg:
-			case leo::ELeoCmd::Char:
-				LogicalId = FName(C.AssetId.c_str());
-				break; // 背景立绘类型由项目表现层定，只做存在性核对
-			case leo::ELeoCmd::Custom:
-				if (C.CustomName == "seq" && !C.CustomArgs.empty())
-				{
-					LogicalId = FName(C.CustomArgs[0].c_str());
-					Usage.bWantsSequence = true;
-				}
-				break;
-			default: break;
-			}
-			if (LogicalId.IsNone() || LogicalId == TEXT("-")) { continue; } // "-" = 移除/停止
-			FLeoAssetUsage& U = Out.FindOrAdd(LogicalId);
-			if (U.FirstFile.IsEmpty()) { U = Usage; }
-			else
-			{
-				U.bWantsSound |= Usage.bWantsSound;
-				U.bWantsSequence |= Usage.bWantsSequence;
+				U.FirstFile = File;
+				U.FirstLine = R.Line;
+				U.Kind = R.Kind;
 			}
 		}
+	}
+
+	// 清单任何表（类别节+旧平表）是否已有该逻辑名
+	bool ManifestHasEntry(const ULeoAssetManifest* Manifest, FName Id)
+	{
+		FName Unused;
+		return Manifest->FindCategoryOf(Id, Unused) || Manifest->Assets.Contains(Id);
 	}
 
 	// 自动发现工程内的 ULeoAssetManifest（唯一的直接用；多个时取字典序第一个并提示）
@@ -177,36 +164,132 @@ namespace
 	}
 
 	// 清单条目 → 资产存在性 + 类型核对（经 AssetRegistry，不加载资产本体）
+	// 类别节：期望类 = 节声明 → 框架默认（内置类别）→ 空（只核存在性）；未引用条目也核对。
+	// 报错：类别名非法/重复、跨节与旧表重复键、脚本使用类别≠条目所在节、声明期望类加载失败。
+	// 旧平表：无类别信息，类型按脚本使用类别的框架默认核（旧行为），非空时提示迁移
 	void CheckManifestEntries(const ULeoAssetManifest* Manifest,
 		const TMap<FName, FLeoAssetUsage>& Usages, TArray<FLeoCheckItem>& Out, int32& OutErrors)
 	{
 		FAssetRegistryModule& ARM = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
 		IAssetRegistry* Reg = &ARM.GetRegistry();
 
-		for (const TPair<FName, FSoftObjectPath>& KV : Manifest->Assets)
+		auto CheckEntry = [&](const TCHAR* Table, FName Id, const FSoftObjectPath& Path, const UClass* WantClass)
 		{
-			const FAssetData Data = Reg->GetAssetByObjectPath(KV.Value, /*bIncludeOnlyOnDiskAssets=*/true);
+			const FAssetData Data = Reg->GetAssetByObjectPath(Path, /*bIncludeOnlyOnDiskAssets=*/true);
 			if (!Data.IsValid())
 			{
 				Out.Add(MakeItem(Manifest->GetName(), 0, TEXT("ASSET_NOT_FOUND"),
-					FString::Printf(TEXT("%s → %s"), *KV.Key.ToString(), *KV.Value.ToString()), true));
+					FString::Printf(TEXT("[%s] %s → %s"), Table, *Id.ToString(), *Path.ToString()), true));
 				++OutErrors;
-				continue;
+				return;
 			}
-			// 类型核对：按脚本用途（bgm/se/voice→声音，seq→序列）；
-			// UMetaSoundSource 等是 USoundBase 子类，IsChildOf 天然覆盖
-			const FLeoAssetUsage* Usage = Usages.Find(KV.Key);
-			if (!Usage) { continue; }
+			if (!WantClass) { return; }
 			UClass* AssetClass = StaticLoadClass(UObject::StaticClass(), nullptr, *Data.AssetClassPath.ToString());
-			const UClass* WantClass = Usage->bWantsSequence ? ULevelSequence::StaticClass()
-				: Usage->bWantsSound ? USoundBase::StaticClass() : nullptr;
-			if (WantClass && (!AssetClass || !AssetClass->IsChildOf(WantClass)))
+			if (!AssetClass || !AssetClass->IsChildOf(WantClass))
 			{
 				Out.Add(MakeItem(Manifest->GetName(), 0, TEXT("ASSET_WRONG_TYPE"),
-					FString::Printf(TEXT("%s 需要 %s，实际 %s"), *KV.Key.ToString(),
+					FString::Printf(TEXT("[%s] %s 需要 %s，实际 %s"), Table, *Id.ToString(),
 						*WantClass->GetName(), *Data.AssetClassPath.ToString()), true));
 				++OutErrors;
 			}
+		};
+
+		TSet<FName> ReportedDups;      // 同键多节共有时只报一次
+		TSet<FName> SeenCategoryNames; // 类别名重复检测
+		for (int32 CatIdx = 0; CatIdx < Manifest->Categories.Num(); ++CatIdx)
+		{
+			const FLeoManifestCategory& Cat = Manifest->Categories[CatIdx];
+			if (Cat.Name.IsNone())
+			{
+				Out.Add(MakeItem(Manifest->GetName(), 0, TEXT("MANIFEST_BAD_CATEGORY"),
+					FString::Printf(TEXT("类别节[%d] 未命名"), CatIdx), true));
+				++OutErrors;
+				continue;
+			}
+			if (SeenCategoryNames.Contains(Cat.Name))
+			{
+				Out.Add(MakeItem(Manifest->GetName(), 0, TEXT("MANIFEST_DUP_CATEGORY"),
+					FString::Printf(TEXT("类别名重复: %s（解析只认首节）"), *Cat.Name.ToString()), true));
+				++OutErrors;
+			}
+			SeenCategoryNames.Add(Cat.Name);
+
+			// 期望类：声明加载失败 = 硬错；否则节声明 → 框架默认 → 空
+			const UClass* WantClass = nullptr;
+			if (!Cat.ExpectedClass.IsNull())
+			{
+				WantClass = Cat.ExpectedClass.LoadSynchronous();
+				if (!WantClass)
+				{
+					Out.Add(MakeItem(Manifest->GetName(), 0, TEXT("MANIFEST_BAD_EXPECTED_CLASS"),
+						FString::Printf(TEXT("[%s] 声明的期望类加载失败: %s"), *Cat.Name.ToString(),
+							*Cat.ExpectedClass.ToString()), true));
+					++OutErrors;
+				}
+			}
+			else if (ULeoAssetManifest::GetBuiltInExpectedClass(Cat.Name))
+			{
+				WantClass = ULeoAssetManifest::GetBuiltInExpectedClass(Cat.Name);
+			}
+			else if (Cat.Assets.Num() > 0)
+			{
+				// bg/char 是内置类别但框架默认只核存在性（表现层自定类型）；其余为自定义类别
+				const bool bBuiltInNoDefault = Cat.Name == ULeoAssetManifest::BgCategory()
+					|| Cat.Name == ULeoAssetManifest::CharCategory();
+				Out.Add(MakeItem(Manifest->GetName(), 0, TEXT("MANIFEST_NO_EXPECTED_CLASS"),
+					bBuiltInNoDefault
+						? FString::Printf(TEXT("[ %s ] %d 条只核存在性（内置类别默认如此；表现层类型固定后可声明增强核对）"),
+							*Cat.Name.ToString(), Cat.Assets.Num())
+						: FString::Printf(TEXT("[ %s ] %d 条只核存在性（自定义类别可声明期望类增强核对）"),
+							*Cat.Name.ToString(), Cat.Assets.Num()), false));
+			}
+
+			for (const TPair<FName, FSoftObjectPath>& KV : Cat.Assets)
+			{
+				CheckEntry(*Cat.Name.ToString(), KV.Key, KV.Value, WantClass);
+
+				// 跨节重复：解析只认首节，重复键让两节各执一词
+				FName OtherCat;
+				if (Manifest->FindCategoryOf(KV.Key, OtherCat) && OtherCat != Cat.Name && !ReportedDups.Contains(KV.Key))
+				{
+					ReportedDups.Add(KV.Key);
+					Out.Add(MakeItem(Manifest->GetName(), 0, TEXT("MANIFEST_DUP_ID"),
+						FString::Printf(TEXT("%s 同时在 %s 与 %s 节"), *KV.Key.ToString(),
+							*OtherCat.ToString(), *Cat.Name.ToString()), true));
+					++OutErrors;
+				}
+				if (Manifest->Assets.Contains(KV.Key) && !ReportedDups.Contains(KV.Key))
+				{
+					ReportedDups.Add(KV.Key);
+					Out.Add(MakeItem(Manifest->GetName(), 0, TEXT("MANIFEST_DUP_ID"),
+						FString::Printf(TEXT("%s 同时在 %s 节与旧平表 Assets"), *KV.Key.ToString(), *Cat.Name.ToString()), true));
+					++OutErrors;
+				}
+
+				// 使用类别 vs 所在节错位（脚本 bgm x 但 x 在 voice 节）
+				const FLeoAssetUsage* Usage = Usages.Find(KV.Key);
+				if (Usage && Usage->Kind != Cat.Name)
+				{
+					const FString& File = Usage->FirstFile.IsEmpty() ? Manifest->GetName() : Usage->FirstFile;
+					Out.Add(MakeItem(File, Usage->FirstLine, TEXT("MANIFEST_KIND_MISMATCH"),
+						FString::Printf(TEXT("脚本以 %s 使用 %s，清单却放在 %s 节"),
+							*Usage->Kind.ToString(), *KV.Key.ToString(), *Cat.Name.ToString()), true));
+					++OutErrors;
+				}
+			}
+		}
+
+		for (const TPair<FName, FSoftObjectPath>& KV : Manifest->Assets)
+		{
+			// 与类别节重复的键已在上面报过，这里只补存在性/类型（类型按使用类别的框架默认）
+			const FLeoAssetUsage* Usage = Usages.Find(KV.Key);
+			const UClass* WantClass = Usage ? ULeoAssetManifest::GetBuiltInExpectedClass(Usage->Kind) : nullptr;
+			CheckEntry(TEXT("assets"), KV.Key, KV.Value, WantClass);
+		}
+		if (Manifest->Assets.Num() > 0)
+		{
+			Out.Add(MakeItem(Manifest->GetName(), 0, TEXT("MANIFEST_LEGACY"),
+				FString::Printf(TEXT("旧平表尚有 %d 条——类型核对退回按脚本使用推断，建议迁入类别节"), Manifest->Assets.Num()), false));
 		}
 	}
 
@@ -583,10 +666,10 @@ FLeoValidateSummary ValidateAllStructured(const FString& ManifestAssetPath)
 
 	if (Manifest)
 	{
-		// 脚本引用了清单没有的逻辑名
+		// 脚本引用了清单没有的逻辑名（分表与旧平表都没有才报）
 		for (const TPair<FName, FLeoAssetUsage>& KV : Usages)
 		{
-			if (!Manifest->Assets.Contains(KV.Key))
+			if (!ManifestHasEntry(Manifest, KV.Key))
 			{
 				Summary.AssetItems.Add(MakeItem(KV.Value.FirstFile, KV.Value.FirstLine, TEXT("NO_MANIFEST_ENTRY"),
 					FString::Printf(TEXT("逻辑名 %s 无清单映射"), *KV.Key.ToString()), true));

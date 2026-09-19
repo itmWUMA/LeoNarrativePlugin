@@ -36,6 +36,9 @@ public class LeoNarrativeEditor : ModuleRules
 			"AssetDefinition",  // T2: UAssetDefinition（Gameplay→Narrative 子菜单入口）
 			"GraphEditor",      // T2: SGraphEditor/SGraphNode/FConnectionDrawingPolicy（画布 1:1 复刻 BT 卡片 + 状态机连线）
 			"EditorFramework",  // T2: FGenericCommands（图面板 Delete 命令）
+			"ContentBrowser",   // M10: 清单编辑器——拖放入库/双击定位（IContentBrowserSingleton）
+			"ClassViewer",      // M10: 清单类别期望类选择弹窗（SClassPickerDialog + FClassViewerInitializationOptions）
+			"EditorWidgets",    // M10: 清单编辑器——资产拖放接收（SDropTarget）
 		}
 		);
 	}

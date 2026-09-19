@@ -509,12 +509,28 @@ bool ULeoNarrativeSubsystem::LoadProgressAndResume()
 	return true;
 }
 
-void ULeoNarrativeSubsystem::SetManifest(ULeoAssetManifest* InManifest)
+void ULeoNarrativeSubsystem::SetManifest(	ULeoAssetManifest* InManifest)
 {
 	Manifest = InManifest;
+	Streamer.SetManifest(InManifest);
 	if (Stage) { Stage->SetManifest(InManifest); }
 	if (Audio) { Audio->SetManifest(InManifest); }
 	if (Sequencer) { Sequencer->SetManifest(InManifest); }
+}
+
+bool ULeoNarrativeSubsystem::PreloadChapter(FName Chapter)
+{
+	if (!Registry) { return false; }
+	TWeakObjectPtr<ULeoNarrativeSubsystem> WeakThis(this);
+	Streamer.PreloadChapter(*Registry, Chapter, FStreamableDelegate::CreateLambda([WeakThis]()
+	{
+		if (ULeoNarrativeSubsystem* S = WeakThis.Get())
+		{
+			UE_LOG(LogLeoNarrative, Display, TEXT("── 章节预载就绪（%d 条常驻）──"), S->Streamer.GetResolvedCount());
+			S->OnPreloadComplete.Broadcast();
+		}
+	}));
+	return true;
 }
 
 void ULeoNarrativeSubsystem::SkipSequences()

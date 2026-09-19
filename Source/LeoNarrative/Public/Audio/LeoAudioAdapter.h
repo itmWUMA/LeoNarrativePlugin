@@ -1,5 +1,5 @@
 // Audio 适配器：BGM/SE/Voice → 清单解析 → PlaySound2D。
-// v0.1 同步加载（缺失时对每个逻辑名只警告一次）。
+// 使用点先查内存（章节预载常驻时零加载），未预载才同步加载兜底（缺失时每逻辑名只警告一次）。
 #pragma once
 
 #include "CoreMinimal.h"

@@ -6,6 +6,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "ScriptRuntime/LeoScriptBridge.h"
 #include "VM/LeoEvents.h"
 #include "LeoSequencerPerformer.generated.h"
 
@@ -23,6 +24,13 @@ class LEONARRATIVE_API ULeoSequencerPerformer : public UObject
 public:
 	// 注册 seq 为严格自定义命令（模块启动期调用，须早于任何剧本编译）
 	static void RegisterSeqCommand();
+
+	// 框架预注册命令中携带资产逻辑名的参数位（当前仅 seq：第 0 个位置参数，类别 "seq"）。
+	// 清单核对与章节预载经此取声明——seq 的知识保持单源，内核零硬编码。
+	static void GetFrameworkAssetArgs(TArray<LeoBridge::FLeoCustomAssetArgInfo>& Out)
+	{
+		Out.Add({ TEXT("seq"), 0, TEXT("seq") });
+	}
 
 	void HandleEvent(const FLeoEvent& Ev);
 	void SetManifest(ULeoAssetManifest* InManifest) { Manifest = InManifest; }

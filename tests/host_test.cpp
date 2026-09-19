@@ -138,6 +138,70 @@ int main()
 		Check(Reads.size() == 3, "分析: 表达式收集 3 个变量名");
 	}
 
+	// ---- 静态分析：表现资产引用收集（清单类别核对 / 章节预载的地基）----
+	// 类别 = 不透明 token 字符串（内置命令产出内置 token；自定义命令由声明表传入）
+	{
+		const FLeoProgram P = CompileChapter(
+			"bg bg_school\n"
+			"char center hero_smile\n"
+			"bgm bgm_daily01\n"
+			"se se_door\n"
+			"voice vo_001\n"
+			"char center -\n"
+			"bgm -\n"
+			"seq cut_intro wait=1\n"
+			"investigate scene_a\n"
+			"text - | x\nend\n", "t_assets");
+		Check(P.Ok, "资产收集: 样例章节编译通过");
+		std::unordered_map<std::string, FLeoAssetRef> Refs;
+		LeoCollectAssetRefs(P, { FLeoCustomAssetArg{ "seq", 0, "seq" } }, Refs);
+		Check(Refs.size() == 6, "资产收集: 6 个引用（'-' 移除不计）");
+		Check(Refs.count("bg_school") == 1 && Refs["bg_school"].Kind == "bg" && Refs["bg_school"].Line == 1,
+			"资产收集: bg → 内置 token bg+首行号");
+		Check(Refs.count("hero_smile") == 1 && Refs["hero_smile"].Kind == "char",
+			"资产收集: char 第二位置参数收为 char");
+		Check(Refs.count("bgm_daily01") == 1 && Refs["bgm_daily01"].Kind == "bgm"
+			&& Refs.count("se_door") == 1 && Refs["se_door"].Kind == "se"
+			&& Refs.count("vo_001") == 1 && Refs["vo_001"].Kind == "voice",
+			"资产收集: bgm/se/voice 各归内置 token");
+		Check(Refs.count("cut_intro") == 1 && Refs["cut_intro"].Kind == "seq",
+			"资产收集: 自定义命令 seq 按声明表收为 seq");
+		Check(Refs.count("scene_a") == 0, "资产收集: 未声明的自定义命令参数不收");
+
+		// 声明表留空 → seq 不再被收集（内核零硬编码的保单）
+		std::unordered_map<std::string, FLeoAssetRef> Refs2;
+		LeoCollectAssetRefs(P, {}, Refs2);
+		Check(Refs2.count("cut_intro") == 0 && Refs2.size() == 5,
+			"资产收集: 无声明时 seq 不收（框架命令知识在声明表不在内核）");
+
+		// 项目自定义类别 token（如 video 命令）原样透传
+		const FLeoProgram P3 = CompileChapter("video clip_a\ntext - | y\nend\n", "t_custom_cat");
+		Check(!P3.Ok, "资产收集: 未注册命令报错（自定义命令需先注册）");
+		SetCustomCommandSpecs({
+			FLeoCommandSpec{ "investigate", 1, 1, { "mode" } },
+			FLeoCommandSpec{ "seq", 1, 1, { "wait", "rate", "start", "loop" } },
+			FLeoCommandSpec{ "video", 1, 1, {} },
+		});
+		const FLeoProgram P4 = CompileChapter("video clip_a\ntext - | y\nend\n", "t_custom_cat2");
+		Check(P4.Ok, "资产收集: 注册 video 命令后编译通过");
+		std::unordered_map<std::string, FLeoAssetRef> Refs4;
+		LeoCollectAssetRefs(P4, { FLeoCustomAssetArg{ "video", 0, "video" } }, Refs4);
+		Check(Refs4.count("clip_a") == 1 && Refs4["clip_a"].Kind == "video",
+			"资产收集: 项目自定义类别 token 原样透传");
+		SetCustomCommandSpecs({ // 还原注册，避免影响后续用例
+			FLeoCommandSpec{ "investigate", 1, 1, { "mode" } },
+			FLeoCommandSpec{ "seq", 1, 1, { "wait", "rate", "start", "loop" } },
+		});
+
+		// 同名跨类冲突保留首个类别（编写问题由清单校验报错）
+		const FLeoProgram P2 = CompileChapter("voice x1\nbg x1\ntext - | y\nend\n", "t_dup");
+		Check(P2.Ok, "资产收集: 跨类样例编译通过");
+		std::unordered_map<std::string, FLeoAssetRef> Refs3;
+		LeoCollectAssetRefs(P2, {}, Refs3);
+		Check(Refs3.count("x1") == 1 && Refs3["x1"].Kind == "voice" && Refs3["x1"].Line == 1,
+			"资产收集: 同名跨类保留首个类别与首行");
+	}
+
 	// ---- 本地化显式文本 ID（spec §8）----
 	{
 		const FLeoProgram P = CompileChapter("text 李雷 | 你好。 id=d/a/0\nend\n", "lid1");

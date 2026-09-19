@@ -63,6 +63,29 @@ void CollectProgramVarUsage(const leo::FLeoProgram& P, TArray<FLeoVarUsageInfo>&
 	}
 }
 
+void CollectProgramAssetRefs(const leo::FLeoProgram& P,
+	const TArray<FLeoCustomAssetArgInfo>& CustomAssetArgs, TArray<FLeoAssetRefInfo>& Out)
+{
+	std::vector<leo::FLeoCustomAssetArg> StdArgs;
+	StdArgs.reserve(CustomAssetArgs.Num());
+	for (const FLeoCustomAssetArgInfo& A : CustomAssetArgs)
+	{
+		if (A.Kind.IsNone()) { continue; }
+		StdArgs.push_back({ ToUtf8(A.Cmd), A.ArgIndex, ToUtf8(A.Kind.ToString()) });
+	}
+	std::unordered_map<std::string, leo::FLeoAssetRef> Refs;
+	leo::LeoCollectAssetRefs(P, StdArgs, Refs);
+	Out.Reserve(Out.Num() + static_cast<int32>(Refs.size()));
+	for (auto& KV : Refs)
+	{
+		FLeoAssetRefInfo Info;
+		Info.Kind = FName(ToFString(KV.second.Kind));
+		Info.Id = ToFString(KV.second.Id);
+		Info.Line = KV.second.Line;
+		Out.Add(MoveTemp(Info));
+	}
+}
+
 const TCHAR* DiagName(leo::ELeoDiag Code)
 {
 	// UTF8_TO_TCHAR 返回临时转换器，不能直接外传指针——拷贝到静态缓冲
