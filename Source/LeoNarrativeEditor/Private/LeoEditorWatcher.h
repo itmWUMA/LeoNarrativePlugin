@@ -18,6 +18,8 @@ private:
 
 	FDelegateHandle ScriptWatchHandle;
 	FDelegateHandle L10nWatchHandle;
+	FString WatchedScriptsDir;  // 注册时缓存（Stop 注销需同路径；关闭期不可再读设置 CDO）
+	FString WatchedL10nDir;
 	TArray<FString> PendingFiles;   // 待重编译的 .leo
 	bool bL10nPending = false;      // CSV 有变更待刷新
 	FTSTicker::FDelegateHandle DebounceHandle;

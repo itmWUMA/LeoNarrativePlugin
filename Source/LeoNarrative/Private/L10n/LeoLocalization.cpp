@@ -1,4 +1,5 @@
 #include "L10n/LeoLocalization.h"
+#include "Settings/LeoNarrativeSettings.h"
 
 #include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
@@ -117,7 +118,7 @@ namespace
 
 FString FLeoL10nTable::L10nDir()
 {
-	return FPaths::ProjectContentDir() / TEXT("L10n");
+	return ULeoNarrativeSettings::Get()->GetL10nDirPath();
 }
 
 void FLeoL10nTable::ListAvailableCultures(TArray<FString>& Out)

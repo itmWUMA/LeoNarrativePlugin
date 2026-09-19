@@ -1,4 +1,5 @@
 #include "LeoVariableHarvest.h"
+#include "Settings/LeoNarrativeSettings.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
@@ -62,7 +63,7 @@ void FLeoVariableHarvest::Rebuild()
 	Vars.Reset();
 
 	// 脚本：Content/Scripts/*.leo 逐个编译收割（与 LeoValidate 同一加载路径，不依赖注册表状态）
-	const FString ScriptsDir = FPaths::ProjectContentDir() / TEXT("Scripts");
+	const FString ScriptsDir = ULeoNarrativeSettings::Get()->GetScriptsDirPath();
 	if (FPaths::DirectoryExists(ScriptsDir))
 	{
 		TArray<FString> Files;

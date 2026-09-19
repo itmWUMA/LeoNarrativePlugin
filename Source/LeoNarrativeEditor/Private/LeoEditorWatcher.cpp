@@ -1,4 +1,5 @@
 #include "LeoEditorWatcher.h"
+#include "Settings/LeoNarrativeSettings.h"
 
 #include "LeoValidation.h"
 #include "LeoVariableHarvest.h"
@@ -24,7 +25,8 @@ namespace
 
 void FLeoEditorWatcher::Start()
 {
-	const FString Dir = FPaths::ProjectContentDir() / TEXT("Scripts");
+	WatchedScriptsDir = ULeoNarrativeSettings::Get()->GetScriptsDirPath();
+	const FString& Dir = WatchedScriptsDir;
 	if (FPaths::DirectoryExists(Dir))
 	{
 		FDirectoryWatcherModule& DW = FModuleManager::LoadModuleChecked<FDirectoryWatcherModule>("DirectoryWatcher");
@@ -40,7 +42,8 @@ void FLeoEditorWatcher::Start()
 	}
 
 	// 译文目录（递归含各语言子目录）：CSV 保存 → 校验中心刷新本地化核对
-	const FString L10nDir = FPaths::ProjectContentDir() / TEXT("L10n");
+	WatchedL10nDir = ULeoNarrativeSettings::Get()->GetL10nDirPath();
+	const FString& L10nDir = WatchedL10nDir;
 	if (FPaths::DirectoryExists(L10nDir))
 	{
 		FDirectoryWatcherModule& DW = FModuleManager::LoadModuleChecked<FDirectoryWatcherModule>("DirectoryWatcher");
@@ -58,8 +61,7 @@ void FLeoEditorWatcher::Stop()
 	{
 		if (FDirectoryWatcherModule* DW = FModuleManager::GetModulePtr<FDirectoryWatcherModule>("DirectoryWatcher"))
 		{
-			const FString Dir = FPaths::ProjectContentDir() / TEXT("Scripts");
-			DW->Get()->UnregisterDirectoryChangedCallback_Handle(Dir, ScriptWatchHandle);
+			DW->Get()->UnregisterDirectoryChangedCallback_Handle(WatchedScriptsDir, ScriptWatchHandle);
 		}
 		ScriptWatchHandle.Reset();
 	}
@@ -67,8 +69,7 @@ void FLeoEditorWatcher::Stop()
 	{
 		if (FDirectoryWatcherModule* DW = FModuleManager::GetModulePtr<FDirectoryWatcherModule>("DirectoryWatcher"))
 		{
-			const FString L10nDir = FPaths::ProjectContentDir() / TEXT("L10n");
-			DW->Get()->UnregisterDirectoryChangedCallback_Handle(L10nDir, L10nWatchHandle);
+			DW->Get()->UnregisterDirectoryChangedCallback_Handle(WatchedL10nDir, L10nWatchHandle);
 		}
 		L10nWatchHandle.Reset();
 	}

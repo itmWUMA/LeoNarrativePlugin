@@ -1,4 +1,5 @@
 #include "LeoL10nToolkit.h"
+#include "Settings/LeoNarrativeSettings.h"
 
 #include "L10n/LeoLocalization.h"
 #include "HAL/FileManager.h"
@@ -30,7 +31,7 @@ namespace
 		return true;
 	}
 
-	FString ScriptsDir() { return FPaths::ProjectContentDir() / TEXT("Scripts"); }
+	FString ScriptsDir() { return ULeoNarrativeSettings::Get()->GetScriptsDirPath(); }
 
 	void ListChapterFiles(TArray<FString>& OutFiles)
 	{

@@ -1,5 +1,6 @@
 #include "Presentation/LeoDialogueWidget.h"
 #include "Subsystem/LeoNarrativeSubsystem.h"
+#include "Settings/LeoNarrativeSettings.h"
 #include "Data/LeoAssetManifest.h"
 #include "Stage/LeoStage.h"
 #include "VM/LeoVM.h"
@@ -39,6 +40,9 @@ void ULeoDialogueWidget::NativeConstruct()
 		BuildUmgTree();
 		bBuiltTree = true;
 	}
+	// auto/skip 节奏经 Project Settings 配置（换项目零代码改动）
+	AutoDelay = FMath::Max(ULeoNarrativeSettings::Get()->AutoAdvanceDelay, 0.01f);
+	SkipDelay = FMath::Max(ULeoNarrativeSettings::Get()->SkipAdvanceDelay, 0.f);
 	if (ULeoNarrativeSubsystem* Sub = GetGameInstance()->GetSubsystem<ULeoNarrativeSubsystem>())
 	{
 		EventHandle = Sub->OnLeoEvent.AddUObject(this, &ULeoDialogueWidget::HandleLeoEvent);

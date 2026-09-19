@@ -1,5 +1,7 @@
 // 运行时控制台命令：无 UI 也能驱动与观测叙事会话（PIE/游戏内 ~ 控制台）
 #include "Subsystem/LeoNarrativeSubsystem.h"
+#include "Settings/LeoNarrativeSettings.h"
+#include "Presentation/LeoDialogueWidget.h"
 #include "Data/LeoAssetManifest.h"
 #include "Data/LeoScenarioGraph.h"
 #include "Stage/LeoSequencerPerformer.h"
@@ -35,6 +37,27 @@ static void RunWhenSubsystemReady(TFunction<void(ULeoNarrativeSubsystem*)> Fn)
 			return true; // 未就绪，继续等
 		}));
 }
+
+// 框架配置转储（验证 Project Settings → Game|LeoNarrative 链路；无头可跑）
+static FAutoConsoleCommand GLeoSettings(
+	TEXT("leo.settings"), TEXT("打印框架配置（目录/档名/内置表现层开关/UI 类/清单/auto-skip 节奏）"),
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>&)
+	{
+		const ULeoNarrativeSettings* C = ULeoNarrativeSettings::Get();
+		UE_LOG(LogTemp, Display, TEXT("[LeoNarrative 配置]"));
+		UE_LOG(LogTemp, Display, TEXT("  剧本目录: %s"), *C->GetScriptsDirPath());
+		UE_LOG(LogTemp, Display, TEXT("  译文目录: %s"), *C->GetL10nDirPath());
+		UE_LOG(LogTemp, Display, TEXT("  全局档槽: %s / 进度档槽: %s"), *C->GlobalSlotName, *C->ProgressSlotName);
+		UE_LOG(LogTemp, Display, TEXT("  内置订阅者: Stage=%s Audio=%s DialogueUI=%s"),
+			C->bCreateBuiltinStage ? TEXT("开") : TEXT("关"),
+			C->bCreateBuiltinAudio ? TEXT("开") : TEXT("关"),
+			C->bCreateBuiltinDialogueUI ? TEXT("开") : TEXT("关"));
+		UE_LOG(LogTemp, Display, TEXT("  对话 UI 类: %s"),
+			C->DialogueWidgetClass.IsValid() ? *C->DialogueWidgetClass.ToString() : TEXT("(内置纯 C++ 实现)"));
+		UE_LOG(LogTemp, Display, TEXT("  默认清单: %s"),
+			*C->DefaultManifest.ToSoftObjectPath().ToString());
+		UE_LOG(LogTemp, Display, TEXT("  auto=%.2fs skip=%.3fs"), C->AutoAdvanceDelay, C->SkipAdvanceDelay);
+	}));
 
 static FAutoConsoleCommand GLeoStart(
 	TEXT("leo.start"), TEXT("开始章节: leo.start <chapter>"),

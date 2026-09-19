@@ -1,4 +1,5 @@
 #include "ScriptRuntime/LeoScriptRegistry.h"
+#include "Settings/LeoNarrativeSettings.h"
 #include "ScriptRuntime/LeoScriptBridge.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
@@ -34,7 +35,7 @@ int32 ULeoScriptRegistry::LoadAndCompileAll()
 	Programs.Reset();
 	LastDiags.Reset();
 
-	const FString Dir = FPaths::ProjectContentDir() / TEXT("Scripts");
+	const FString Dir = ULeoNarrativeSettings::Get()->GetScriptsDirPath();
 	TArray<FString> Files;
 	IFileManager::Get().FindFiles(Files, *(Dir / TEXT("*.leo")), true, false);
 	Files.Sort();
@@ -50,7 +51,7 @@ int32 ULeoScriptRegistry::LoadAndCompileAll()
 
 bool ULeoScriptRegistry::RecompileChapter(FName Chapter)
 {
-	const FString Dir = FPaths::ProjectContentDir() / TEXT("Scripts");
+	const FString Dir = ULeoNarrativeSettings::Get()->GetScriptsDirPath();
 	const FString Path = Dir / Chapter.ToString() + TEXT(".leo");
 	if (!FPaths::FileExists(Path))
 	{

@@ -1,5 +1,6 @@
 // ULeoNarrativeSubsystem：会话管理门面（Facade）。
 // 持有全局黑板 / 剧本注册表 / 活跃 VM；每帧驱动 VM；把 VM 事件转发给表现层订阅者。
+// BP 集成面：门面 API 全部 BlueprintCallable；事件经 OnLeoEventBP（蓝图）/ OnLeoEvent（C++）双通道同流广播。
 #pragma once
 
 #include "CoreMinimal.h"
@@ -60,6 +61,10 @@ struct LEONARRATIVE_API FLeoDebugSnapshot
 	TArray<FString> CustomCommands;
 };
 
+// 蓝图侧完结/预载通知
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FLeoOnGraphFinishedBP, FName, EndingId);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FLeoOnPreloadCompleteBP);
+
 UCLASS()
 class LEONARRATIVE_API ULeoNarrativeSubsystem : public UGameInstanceSubsystem
 {
@@ -70,32 +75,46 @@ public:
 	virtual void Deinitialize() override;
 
 	// ---- 会话控制 ----
+	UFUNCTION(BlueprintCallable, Category = "LeoNarrative|Session")
 	bool StartChapter(FName Chapter);
 	// 从指定 label+偏移恢复（读档路径）
+	UFUNCTION(BlueprintCallable, Category = "LeoNarrative|Session")
 	bool StartChapterAt(FName Chapter, FName Label, int32 Offset);
+	UFUNCTION(BlueprintCallable, Category = "LeoNarrative|Session")
 	void Stop();
+	UFUNCTION(BlueprintCallable, Category = "LeoNarrative|Session", meta = (ToolTip = "点击推进（WaitClick 处生效）"))
 	bool Advance();
+	UFUNCTION(BlueprintCallable, Category = "LeoNarrative|Session")
 	bool Choose(int32 Index);
 
 	// ---- 播放模式（表现层读取；auto 定时推进 / skip 快进，choice 处都停下）----
+	UFUNCTION(BlueprintCallable, Category = "LeoNarrative|Playback")
 	void SetAuto(bool bOn) { bAuto = bOn; }
+	UFUNCTION(BlueprintPure, Category = "LeoNarrative|Playback")
 	bool IsAuto() const { return bAuto; }
+	UFUNCTION(BlueprintCallable, Category = "LeoNarrative|Playback")
 	void SetSkip(bool bOn) { bSkip = bOn; }
+	UFUNCTION(BlueprintPure, Category = "LeoNarrative|Playback")
 	bool IsSkip() const { return bSkip; }
 
 	// ---- 访问 ----
-	ULeoVM* GetActiveVM() const { return ActiveVM; }
+	UFUNCTION(BlueprintPure, Category = "LeoNarrative")
 	UNarrativeBlackboard* GetGlobalBlackboard() const { return GlobalBB; }
+	ULeoVM* GetActiveVM() const { return ActiveVM; }
 	ULeoScriptRegistry* GetRegistry() const { return Registry; }
+	UFUNCTION(BlueprintPure, Category = "LeoNarrative")
 	ULeoStage* GetStage() const { return Stage; }
+	UFUNCTION(BlueprintPure, Category = "LeoNarrative")
 	ULeoAudioAdapter* GetAudio() const { return Audio; }
 	ULeoSequencerPerformer* GetSequencer() const { return Sequencer; }
 
-	// 跳过当前过场：停掉所有序列播放，若阻塞在 seq 断点则以 0 恢复（脚本走兜底分支）
+	UFUNCTION(BlueprintCallable, Category = "LeoNarrative|Sequencer", meta = (ToolTip = "跳过当前过场：停掉所有序列，seq 断点以 0 恢复（走兜底分支）"))
 	void SkipSequences();
 
-	// 逻辑名清单（可选；未设置时表现层降级为占位/静音）
+	// 逻辑名清单（可选；未设置时表现层降级为占位/静音。设置里的 DefaultManifest 会在启动时自动装载）
+	UFUNCTION(BlueprintCallable, Category = "LeoNarrative|Assets")
 	void SetManifest(ULeoAssetManifest* InManifest);
+	UFUNCTION(BlueprintPure, Category = "LeoNarrative|Assets")
 	ULeoAssetManifest* GetManifest() const { return Manifest; }
 
 	// ---- 章节资产预载（转场窗口调用）----
@@ -103,64 +122,101 @@ public:
 	// → 清单分表解析 → StreamableManager 异步批量加载；句柄存活期间资产常驻，
 	// 使用点（ResolveObject/TryLoad）直接命中内存，零同步加载卡顿。
 	// 与 StartChapter 相互独立，典型时序 = 转场遮罩下预载 → 完成后开章。
+	UFUNCTION(BlueprintCallable, Category = "LeoNarrative|Preload")
 	bool PreloadChapter(FName Chapter);
+	UFUNCTION(BlueprintPure, Category = "LeoNarrative|Preload")
 	bool IsPreloadComplete() const { return !Streamer.IsLoadInProgress(); }
+	UFUNCTION(BlueprintCallable, Category = "LeoNarrative|Preload")
 	void ReleasePreloadedAssets() { Streamer.ReleaseHandle(); } // 切章/低内存时主动释放
+	UFUNCTION(BlueprintPure, Category = "LeoNarrative|Preload")
 	int32 GetPreloadAssetCount() const { return Streamer.GetResolvedCount(); }
 	const TArray<FName>& GetPreloadMissedIds() const { return Streamer.GetMissedIds(); }
 
 	// 预载完成（游戏线程；此时本章资产可零加载使用）
 	DECLARE_MULTICAST_DELEGATE(FLeoOnPreloadComplete);
 	FLeoOnPreloadComplete OnPreloadComplete;
+	// 蓝图版（同流广播）
+	UPROPERTY(BlueprintAssignable, Category = "LeoNarrative|Preload")
+	FLeoOnPreloadCompleteBP OnPreloadCompleteBP;
 
-	// 对话 UI 开关（纯 C++ Slate，无需编辑器资产）
+	UFUNCTION(BlueprintCallable, Category = "LeoNarrative|UI", meta = (ToolTip = "挂载/卸载内置对话 UI；设置里关闭内置 UI 时无操作"))
 	void ShowDialogueUI(bool bShow);
 
 	// ---- ScenarioGraph 编排（节点类型化：Chapter/Branch/Ending/Subgraph）----
 	// 从图的节点跑；转移时机 = 章末 / Branch 立即；子图收束后回父层继续；
 	// 最外层图到达 Ending 或无路可走时完结，经 OnGraphFinished 广播 EndingId
+	UFUNCTION(BlueprintCallable, Category = "LeoNarrative|Graph")
 	void StartGraph(ULeoScenarioGraph* Graph, FName StartNode = NAME_None);
+	UFUNCTION(BlueprintPure, Category = "LeoNarrative|Graph")
 	bool IsGraphActive() const { return GraphStack.Num() > 0; }
+	UFUNCTION(BlueprintPure, Category = "LeoNarrative|Graph")
 	FName GetCurrentGraphNode() const { return GraphStack.IsEmpty() ? NAME_None : GraphStack.Last().NodeId; }
+	UFUNCTION(BlueprintPure, Category = "LeoNarrative|Graph")
 	const ULeoScenarioGraph* GetActiveGraph() const { return GraphStack.IsEmpty() ? nullptr : GraphStack.Last().Graph; }
 
 	// 图完结（外层）：EndingId = Ending 节点标识；NAME_None = 无路可走收束
 	DECLARE_MULTICAST_DELEGATE_OneParam(FLeoOnGraphFinished, FName /*EndingId*/);
 	FLeoOnGraphFinished OnGraphFinished;
+	// 蓝图版（同流广播）：结局解锁/成就数据源
+	UPROPERTY(BlueprintAssignable, Category = "LeoNarrative|Graph")
+	FLeoOnGraphFinishedBP OnGraphFinishedBP;
 
 	// ---- 自定义命令与玩法断点 ----
 	// 严格注册：编译期按 spec 校验参数（编辑期报错带行号）
 	void RegisterCommand(FName Name, const LeoBridge::FLeoCmdSpec& Spec, ULeoVM::FCustomHandler Handler);
 	// 宽松注册（只登记名字，参数不校验）
 	void RegisterCommandHandler(FName Name, ULeoVM::FCustomHandler Handler);
-	// 玩法断点恢复：payload 写局部黑板键 <token>，脚本 jumpif 分流
+	// 玩法断点恢复（C++）：payload 写局部黑板键 <token>，脚本 jumpif 分流
 	bool ResumeWith(FName Token, const leo::FLeoValue& Payload);
+	// 玩法断点恢复（蓝图 typed 变体，语义同上）
+	UFUNCTION(BlueprintCallable, Category = "LeoNarrative|Gameplay")
+	bool ResumeWithInt(FName Token, int32 Payload);
+	UFUNCTION(BlueprintCallable, Category = "LeoNarrative|Gameplay")
+	bool ResumeWithFloat(FName Token, float Payload);
+	UFUNCTION(BlueprintCallable, Category = "LeoNarrative|Gameplay")
+	bool ResumeWithBool(FName Token, bool Payload);
+	UFUNCTION(BlueprintCallable, Category = "LeoNarrative|Gameplay")
+	bool ResumeWithString(FName Token, const FString& Payload);
 
-	// ---- 双档体系 ----
+	// ---- 双档体系（槽名经 Project Settings 配置，默认 LeoNarrative/Global|Progress）----
+	UFUNCTION(BlueprintCallable, Category = "LeoNarrative|Save")
 	bool SaveGlobal();             // 全局档：已读文本 ID + 全局黑板
+	UFUNCTION(BlueprintCallable, Category = "LeoNarrative|Save")
 	bool LoadGlobal();
+	UFUNCTION(BlueprintCallable, Category = "LeoNarrative|Save")
 	bool SaveProgress();           // 进度档：图位置 + VM 锚点 + 局部黑板快照
+	UFUNCTION(BlueprintCallable, Category = "LeoNarrative|Save")
 	bool LoadProgressAndResume();  // 全局档 + 进度档一并恢复并续跑
 
 	// 重新扫描编译剧本（编辑器热重载）
+	UFUNCTION(BlueprintCallable, Category = "LeoNarrative|Session")
 	bool ReloadScripts();
 
 	// ---- 剧本台词本地化（CSV 译文表：查不到回落原文）----
 	FLeoL10nTable& GetL10n() { return L10n; }
+	UFUNCTION(BlueprintCallable, Category = "LeoNarrative|Localization")
 	bool SetLanguage(const FString& Culture);   // 切语言并重载译文表（影响后续广播的显示文本）
+	UFUNCTION(BlueprintPure, Category = "LeoNarrative|Localization")
 	FString GetCurrentLanguage() const;
+
+	// ---- 已读跟踪（Backlog 高亮/鉴赏解锁的数据源）----
+	UFUNCTION(BlueprintPure, Category = "LeoNarrative|Progress")
+	bool IsTextRead(const FString& TextId) const { return ReadTextIds.Contains(TextId); }
+	UFUNCTION(BlueprintPure, Category = "LeoNarrative|Progress")
+	int32 GetReadTextCount() const { return ReadTextIds.Num(); }
+	const TSet<FString>& GetReadTextIds() const { return ReadTextIds; }
 
 	// ---- 调试支持 ----
 	void GetDebugSnapshot(FLeoDebugSnapshot& Out) const; // 只读快照（调试器 Tab 轮询）
 	const TArray<FString>& GetEventLog() const { return EventLog; }
-	static const TCHAR* GlobalSlotName()   { return TEXT("LeoNarrative/Global"); }
-	static const TCHAR* ProgressSlotName() { return TEXT("LeoNarrative/Progress"); }
+	static FString GlobalSlotName();   // 读设置（默认 LeoNarrative/Global）
+	static FString ProgressSlotName(); // 读设置（默认 LeoNarrative/Progress）
 
-	// 表现层订阅入口（UI/Stage/Audio 全部从这里拿事件）
+	// 表现层订阅入口（C++ 原生快速通道：内置 UI/Stage/Audio 从这里拿事件）
 	FLeoEventSignature OnLeoEvent;
-
-	// 已读文本 ID（进全局档）
-	const TSet<FString>& GetReadTextIds() const { return ReadTextIds; }
+	// 蓝图订阅通道（与 OnLeoEvent 同流广播；自建 UI 的项目从这里接管演出）
+	UPROPERTY(BlueprintAssignable, Category = "LeoNarrative|Events")
+	FLeoEventSignatureBP OnLeoEventBP;
 
 private:
 	bool StartChapterInternal(FName Chapter, FName Label, int32 Offset);
@@ -169,6 +225,7 @@ private:
 	void RunGraphNode(FName NodeId);        // 按节点类型分派
 	void AdvanceGraph();                    // 章末转移入口
 	void AdvanceFromCurrentNode();          // 出边选择循环（子图收束自动弹栈）
+	void FinishGraph(FName EndingId);       // 清栈 + 双通道广播完结
 	void RefreshCommandRegistry(); // 把 VM 静态命令表同步给编译注册表
 
 	UPROPERTY()

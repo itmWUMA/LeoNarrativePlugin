@@ -41,6 +41,7 @@ public class LeoNarrative : ModuleRules
 				"UMG",             // ULeoDialogueWidget（纯 C++ Slate 构建）
 				"LevelSequence",   // seq 命令：SequencerPerformer 播放 ULevelSequence
 				"MovieScene",      // 播放器基类 UMovieSceneSequencePlayer/UMovieScene（显式链接，不依赖传递）
+				"DeveloperSettings", // ULeoNarrativeSettings：Project Settings 页配置对象
 				// ... add private dependencies that you statically link with here ...
 			}
 			);

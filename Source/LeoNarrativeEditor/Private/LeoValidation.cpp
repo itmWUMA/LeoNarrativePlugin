@@ -1,4 +1,5 @@
 #include "LeoValidation.h"
+#include "Settings/LeoNarrativeSettings.h"
 
 #include "Data/LeoAssetManifest.h"
 #include "Data/LeoScenarioGraph.h"
@@ -492,7 +493,7 @@ namespace
 
 		for (const FString& Culture : Cultures)
 		{
-			const FString Dir = FPaths::ProjectContentDir() / TEXT("L10n") / Culture;
+			const FString Dir = ULeoNarrativeSettings::Get()->GetL10nDirPath() / Culture;
 			TArray<FString> Files;
 			IFileManager::Get().FindFiles(Files, *(Dir / TEXT("*.csv")), true, false);
 			Files.Sort();
@@ -587,7 +588,7 @@ FLeoValidateSummary ValidateAllStructured(const FString& ManifestAssetPath)
 		TMap<FName, TSet<FName>> ChapterLabels;
 		TSet<FName> ScriptWrittenVars;
 		TMap<FString, FString> ScriptTextSources; // TextId → 当前原文（本地化 CSV 交叉核对用）
-		const FString ScriptsDir = FPaths::ProjectContentDir() / TEXT("Scripts");
+		const FString ScriptsDir = ULeoNarrativeSettings::Get()->GetScriptsDirPath();
 	if (FPaths::DirectoryExists(ScriptsDir))
 	{
 		TArray<FString> Files;

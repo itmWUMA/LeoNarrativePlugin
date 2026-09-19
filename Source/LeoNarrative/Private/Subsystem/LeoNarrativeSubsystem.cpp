@@ -8,6 +8,7 @@
 #include "Presentation/LeoDialogueWidget.h"
 #include "Save/LeoSaveGame.h"
 #include "ScriptRuntime/LeoScriptBridge.h"
+#include "Settings/LeoNarrativeSettings.h"
 #include "Stage/LeoSequencerPerformer.h"
 #include "Stage/LeoStage.h"
 #include "Kismet/GameplayStatics.h"
@@ -18,6 +19,8 @@ void ULeoNarrativeSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
 
+	const ULeoNarrativeSettings* Settings = ULeoNarrativeSettings::Get();
+
 	GlobalBB = NewObject<UNarrativeBlackboard>(this);
 	GlobalBB->AddToRoot(); // 全局黑板跨章节存活，防 GC
 	Registry = NewObject<ULeoScriptRegistry>(this);
@@ -26,16 +29,30 @@ void ULeoNarrativeSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	Registry->CustomCommandNames = ULeoVM::GetLenientCommandNames();
 	Registry->LoadAndCompileAll();
 
-	// 表现层（事件订阅者；VM 广播 → 子系统转发 → 这里消费）
-	Stage = NewObject<ULeoStage>(this);
-	Audio = NewObject<ULeoAudioAdapter>(this);
-	Audio->SetWorldContext(GetGameInstance());
-	OnLeoEvent.AddUObject(Stage, &ULeoStage::HandleEvent);
-	OnLeoEvent.AddUObject(Audio, &ULeoAudioAdapter::HandleEvent);
+	// 表现层（事件订阅者；VM 广播 → 子系统转发 → 这里消费）。
+	// Stage/Audio 可经设置整体关闭——项目自建演出时只留事件广播（铁律 #3 的接管面）。
+	if (Settings->bCreateBuiltinStage)
+	{
+		Stage = NewObject<ULeoStage>(this);
+		OnLeoEvent.AddUObject(Stage, &ULeoStage::HandleEvent);
+	}
+	if (Settings->bCreateBuiltinAudio)
+	{
+		Audio = NewObject<ULeoAudioAdapter>(this);
+		Audio->SetWorldContext(GetGameInstance());
+		OnLeoEvent.AddUObject(Audio, &ULeoAudioAdapter::HandleEvent);
+	}
+	// Sequencer 恒创建：seq 命令的框架执行者（缺资源兜底恢复 0，不软锁），不是可选订阅者
 	Sequencer = NewObject<ULeoSequencerPerformer>(this);
 	Sequencer->SetOwner(this);
 	Sequencer->SetWorldContext(GetGameInstance());
 	OnLeoEvent.AddUObject(Sequencer, &ULeoSequencerPerformer::HandleEvent);
+
+	// 项目默认清单（设置里配置；空 = 占位/静音模式，运行时 SetManifest 可覆盖）
+	if (ULeoAssetManifest* M = Settings->DefaultManifest.LoadSynchronous())
+	{
+		SetManifest(M);
+	}
 
 	// GameInstanceSubsystem 没有 Tick，用核心 Ticker 驱动 VM（游戏线程）
 	TickerHandle = FTSTicker::GetCoreTicker().AddTicker(
@@ -172,6 +189,36 @@ bool ULeoNarrativeSubsystem::ResumeWith(FName Token, const leo::FLeoValue& Paylo
 	return ActiveVM && ActiveVM->ResumeWith(Token, Payload);
 }
 
+bool ULeoNarrativeSubsystem::ResumeWithInt(FName Token, int32 Payload)
+{
+	return ResumeWith(Token, leo::FLeoValue::MakeInt(Payload));
+}
+
+bool ULeoNarrativeSubsystem::ResumeWithFloat(FName Token, float Payload)
+{
+	return ResumeWith(Token, leo::FLeoValue::MakeFloat(Payload));
+}
+
+bool ULeoNarrativeSubsystem::ResumeWithBool(FName Token, bool Payload)
+{
+	return ResumeWith(Token, leo::FLeoValue::MakeBool(Payload));
+}
+
+bool ULeoNarrativeSubsystem::ResumeWithString(FName Token, const FString& Payload)
+{
+	return ResumeWith(Token, leo::FLeoValue::MakeString(LeoBridge::ToUtf8(Payload)));
+}
+
+FString ULeoNarrativeSubsystem::GlobalSlotName()
+{
+	return ULeoNarrativeSettings::Get()->GlobalSlotName;
+}
+
+FString ULeoNarrativeSubsystem::ProgressSlotName()
+{
+	return ULeoNarrativeSettings::Get()->ProgressSlotName;
+}
+
 void ULeoNarrativeSubsystem::HandleVMEvent(const FLeoEvent& Ev)
 {
 	// 本地化替换：只改显示文本，TextId/锚点/已读记录不动；查不到译文回落原文
@@ -225,6 +272,7 @@ void ULeoNarrativeSubsystem::HandleVMEvent(const FLeoEvent& Ev)
 		break;
 	}
 	OnLeoEvent.Broadcast(Display);
+	OnLeoEventBP.Broadcast(Display); // 蓝图订阅方（同一条事件流，经反射结构体）
 }
 
 bool ULeoNarrativeSubsystem::TickVM(float DeltaSeconds)
@@ -289,15 +337,13 @@ void ULeoNarrativeSubsystem::RunGraphNode(FName NodeId)
 		if (!Node->SubGraph)
 		{
 			UE_LOG(LogLeoNarrative, Error, TEXT("Subgraph 节点 %s 未配置子图 —— 图终止"), *NodeId.ToString());
-			GraphStack.Reset();
-			OnGraphFinished.Broadcast(NAME_None);
+			FinishGraph(NAME_None);
 			return;
 		}
 		if (GraphStack.Num() >= MaxGraphDepth)
 		{
 			UE_LOG(LogLeoNarrative, Error, TEXT("子图嵌套超过 %d 层（疑似自引用循环）—— 图终止"), MaxGraphDepth);
-			GraphStack.Reset();
-			OnGraphFinished.Broadcast(NAME_None);
+			FinishGraph(NAME_None);
 			return;
 		}
 		UE_LOG(LogLeoNarrative, Display, TEXT("── 子图进入: %s ──"), *Node->SubGraph->GetName());
@@ -322,8 +368,7 @@ void ULeoNarrativeSubsystem::RunGraphNode(FName NodeId)
 		{
 			UE_LOG(LogLeoNarrative, Display, TEXT("── 结局: %s ──"),
 				EndingId.IsNone() ? TEXT("(未命名)") : *EndingId.ToString());
-			GraphStack.Reset();
-			OnGraphFinished.Broadcast(EndingId);
+			FinishGraph(EndingId);
 		}
 		break;
 	}
@@ -344,8 +389,7 @@ void ULeoNarrativeSubsystem::AdvanceFromCurrentNode()
 		if (!Node)
 		{
 			UE_LOG(LogLeoNarrative, Error, TEXT("图节点丢失: %s —— 图终止"), *Top.NodeId.ToString());
-			GraphStack.Reset();
-			OnGraphFinished.Broadcast(NAME_None);
+			FinishGraph(NAME_None);
 			return;
 		}
 		UNarrativeBlackboard* Local = ActiveVM ? ActiveVM->GetLocalBlackboard() : nullptr;
@@ -362,10 +406,16 @@ void ULeoNarrativeSubsystem::AdvanceFromCurrentNode()
 			continue;
 		}
 		UE_LOG(LogLeoNarrative, Display, TEXT("── 图完结（节点 %s 无满足条件的出边）──"), *Top.NodeId.ToString());
-		GraphStack.Reset();
-		OnGraphFinished.Broadcast(NAME_None);
+		FinishGraph(NAME_None);
 		return;
 	}
+}
+
+void ULeoNarrativeSubsystem::FinishGraph(FName EndingId)
+{
+	GraphStack.Reset();
+	OnGraphFinished.Broadcast(EndingId);
+	OnGraphFinishedBP.Broadcast(EndingId);
 }
 
 // ---- 双档体系 ----
@@ -528,6 +578,7 @@ bool ULeoNarrativeSubsystem::PreloadChapter(FName Chapter)
 		{
 			UE_LOG(LogLeoNarrative, Display, TEXT("── 章节预载就绪（%d 条常驻）──"), S->Streamer.GetResolvedCount());
 			S->OnPreloadComplete.Broadcast();
+			S->OnPreloadCompleteBP.Broadcast();
 		}
 	}));
 	return true;
@@ -540,6 +591,11 @@ void ULeoNarrativeSubsystem::SkipSequences()
 
 void ULeoNarrativeSubsystem::ShowDialogueUI(bool bShow)
 {
+	const ULeoNarrativeSettings* Settings = ULeoNarrativeSettings::Get();
+	if (!Settings->bCreateBuiltinDialogueUI)
+	{
+		return; // 内置 UI 关闭：对话演出由项目自建 UI 订阅 OnLeoEventBP 接管
+	}
 	if (bShow)
 	{
 		if (!DialogueWidget)
@@ -550,7 +606,9 @@ void ULeoNarrativeSubsystem::ShowDialogueUI(bool bShow)
 				UE_LOG(LogLeoNarrative, Warning, TEXT("没有本地 PlayerController，无法创建对话 UI"));
 				return;
 			}
-			DialogueWidget = CreateWidget<ULeoDialogueWidget>(PC, ULeoDialogueWidget::StaticClass());
+			// 类注入：设置里配了子类用子类（换皮），空/加载失败回落内置纯 C++ 实现
+			UClass* WidgetClass = Settings->DialogueWidgetClass.LoadSynchronous();
+			DialogueWidget = CreateWidget<ULeoDialogueWidget>(PC, WidgetClass ? WidgetClass : ULeoDialogueWidget::StaticClass());
 		}
 		if (DialogueWidget)
 		{
